@@ -280,27 +280,38 @@ func icmpv6ExtensionLength(icmp *layers.ICMPv6) uint8 {
 
 // RFC 7915 Sections 4.3 and 5.3: translating an ICMP error must not decrement the quoted packet's TTL or Hop Limit.
 func TestTranslateICMPErrorPreservesQuotedHopLimit(t *testing.T) {
-	inner := ipv6TCPPacketWithAddresses(t, 37, ipv6Source, ipv6Dest)
-	input := ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, inner.Data())
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	})
-	outer := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
-	icmp, ok := outer.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-	if !ok {
-		t.Fatalf("missing translated ICMPv4 layer: %v", outer.ErrorLayer())
-	}
-	quoted := gopacket.NewPacket(icmp.Payload, layers.LayerTypeIPv4, gopacket.Default)
-	ip, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	if !ok || ip.TTL != 37 || !ip.SrcIP.Equal(ipv4RouterAddress) || !ip.DstIP.Equal(ipv6TranslatedDest) || ip.Protocol != layers.IPProtocolTCP {
-		t.Fatalf("quoted IPv6 Hop Limit was decremented during translation: %+v", ip)
-	}
-	tcp, ok := quoted.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if !ok || !bytes.Equal(tcp.Payload, []byte("hello")) {
-		t.Fatalf("quoted IPv6 transport data was not translated: %v", quoted.ErrorLayer())
-	}
-	if outerIP := outer.Layer(layers.LayerTypeIPv4).(*layers.IPv4); outerIP.Length != uint16(len(result)) {
-		t.Fatalf("translated IPv6 ICMP error has incorrect IPv4 total length: %d", outerIP.Length)
+	for _, test := range []struct {
+		name        string
+		innerSource net.IP
+		wantSource  net.IP
+	}{
+		{name: "mapped source", innerSource: ipv4TranslatedDest, wantSource: ipv4Dest},
+		{name: "fallback source", innerSource: ipv6Source, wantSource: ipv4RouterAddress},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inner := ipv6TCPPacketWithAddresses(t, 37, test.innerSource, ipv6Dest)
+			input := ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, inner.Data())
+			result := mustTranslate(t, func() ([]byte, error) {
+				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			})
+			outer := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			icmp, ok := outer.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+			if !ok {
+				t.Fatalf("missing translated ICMPv4 layer: %v", outer.ErrorLayer())
+			}
+			quoted := gopacket.NewPacket(icmp.Payload, layers.LayerTypeIPv4, gopacket.Default)
+			ip, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+			if !ok || ip.TTL != 37 || !ip.SrcIP.Equal(test.wantSource) || !ip.DstIP.Equal(ipv6TranslatedDest) || ip.Protocol != layers.IPProtocolTCP {
+				t.Fatalf("quoted IPv6 header was not translated as expected: %+v", ip)
+			}
+			tcp, ok := quoted.Layer(layers.LayerTypeTCP).(*layers.TCP)
+			if !ok || !bytes.Equal(tcp.Payload, []byte("hello")) {
+				t.Fatalf("quoted IPv6 transport data was not translated: %v", quoted.ErrorLayer())
+			}
+			if outerIP := outer.Layer(layers.LayerTypeIPv4).(*layers.IPv4); outerIP.Length != uint16(len(result)) {
+				t.Fatalf("translated IPv6 ICMP error has incorrect IPv4 total length: %d", outerIP.Length)
+			}
+		})
 	}
 }
 

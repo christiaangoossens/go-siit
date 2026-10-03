@@ -1,6 +1,7 @@
 package siit
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -28,6 +29,9 @@ var (
 	ErrUnsupportedProtocol    = errors.New("Unsupported protocol")
 	ErrICMPTranslationMissing = errors.New("ICMP translation is not implemented")
 	ErrTimeExceeded           = errors.New("TTL or Hop Limit expired")
+	ErrUnsupportedSrcIP       = errors.New("Unsupported source IP address")
+	ErrUnsupportedDestIP      = errors.New("Unsupported destination IP address")
+	ErrPacketOversized        = errors.New("Packet is too large to be translated without possible fragmentation")
 )
 
 type TranslationError struct {
@@ -106,10 +110,18 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 	}
 
 	ip, _ := ipLayer.(*layers.IPv4)
+
+	// Check packet size
+	if ip.Length > 1260 {
+		return nil, fmt.Errorf("%w: IPv4 packet length %d exceeds 1260 bytes", ErrPacketOversized, ip.Length)
+	}
+
+	// Check if TTL would be 0, if so generate an ICMP Time Exceeded message back to the source of the original packet
 	if ip.TTL <= 1 {
 		packet := t.generateIPv6TimeExceeded(ip)
 		return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet}
 	}
+
 	protocol := ip.Protocol
 	if protocol == layers.IPProtocolIGMP {
 		return nil, nil
@@ -117,6 +129,15 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 
 	if protocol == layers.IPProtocolICMPv4 {
 		protocol = layers.IPProtocolICMPv6
+	}
+
+	// Verify that src and dst are both unicast
+	if !ip.SrcIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv4 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
+	}
+
+	if !ip.DstIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv4 destination %s is not unicast", ErrUnsupportedDestIP, ip.DstIP)
 	}
 
 	// If IP overrides are provided, use them; otherwise, map the addresses
@@ -160,7 +181,7 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 	case layers.IPProtocolUDP:
 		payload = translateUDPv4(ipv6, ip.Payload)
 	default:
-		return nil, fmt.Errorf("%w: IPv4 protocol %d", ErrUnsupportedProtocol, protocol)
+		payload = ip.Payload
 	}
 	if dropped {
 		return nil, nil
@@ -305,14 +326,45 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 	}
 
 	ip, _ := ipLayer.(*layers.IPv6)
+
+	// Check if TTL would be 0, if so geerate an ICMP Time Exceeded message back to the source of the original packet
 	if ip.HopLimit <= 1 {
 		packet := t.generateIPv4TimeExceeded(ip)
 		return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet}
 	}
+
+	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915)
 	protocol := ip.NextHeader
+	sanitizedPayload := ip.Payload
+	for _, layer := range packet.Layers() {
+		switch extension := layer.(type) {
+		case *layers.IPv6HopByHop:
+			protocol = extension.NextHeader
+			sanitizedPayload = extension.Payload
+		case *layers.IPv6Routing:
+			if extension.SegmentsLeft != 0 {
+				result := t.generateIPv6ParameterProblem(ip, 43)
+				return result, fmt.Errorf("%w: IPv6 routing header has segments left", ErrInvalidPacket)
+			}
+			protocol = extension.NextHeader
+			sanitizedPayload = extension.Payload
+		case *layers.IPv6Destination:
+			protocol = extension.NextHeader
+			sanitizedPayload = extension.Payload
+		}
+	}
 
 	if protocol == layers.IPProtocolICMPv6 {
 		protocol = layers.IPProtocolICMPv4
+	}
+
+	// Verify that src and dst are both unicast
+	if !ip.SrcIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv6 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
+	}
+
+	if !ip.DstIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv6 destination %s is not unicast", ErrUnsupportedDestIP, ip.DstIP)
 	}
 
 	// Determine source IP
@@ -363,9 +415,9 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 	case layers.IPProtocolICMPv4:
 		payload, dropped = t.translateICMPv6(dstIP, ip.Payload)
 	case layers.IPProtocolTCP:
-		payload = translateTCPv6(ipv4, ip.Payload)
+		payload = translateTCPv6(ipv4, sanitizedPayload)
 	case layers.IPProtocolUDP:
-		payload = translateUDPv6(ipv4, ip.Payload)
+		payload = translateUDPv6(ipv4, sanitizedPayload)
 	case layers.IPProtocolIPv6Fragment:
 		fragmentLayer := packet.Layer(layers.LayerTypeIPv6Fragment)
 		if fragmentLayer == nil {
@@ -386,7 +438,8 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		ipv4.Protocol = fragment.NextHeader
 		payload = fragment.Payload
 	default:
-		return nil, fmt.Errorf("%w: IPv6 protocol %d", ErrUnsupportedProtocol, protocol)
+		// Unknown protocols are forwarded as opaque payloads.
+		payload = sanitizedPayload
 	}
 	if dropped {
 		return nil, nil
@@ -413,6 +466,23 @@ func decrementHopLimit(value uint8) uint8 {
 		return 0
 	}
 	return value - 1
+}
+
+func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint32) []byte {
+	outer := &layers.IPv6{
+		Version:    6,
+		NextHeader: layers.IPProtocolICMPv6,
+		HopLimit:   64,
+		SrcIP:      t.mapIPv4ToIPv6(t.ipv4RouterAddress),
+		DstIP:      ip.SrcIP,
+	}
+	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(4, 0)}
+	if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
+		return nil
+	}
+	pointerBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(pointerBytes, pointer)
+	return serializePacket(outer, icmp, gopacket.Payload(pointerBytes))
 }
 
 func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) []byte {
@@ -606,9 +676,7 @@ func (t *Translator) generateICMPv6Error(typeNr byte, code byte, dest net.IP, pa
 func (t *Translator) generateICMPv6ErrorData(dest net.IP, payload []byte) []byte {
 	innerPacket := gopacket.NewPacket(payload[8:], layers.LayerTypeIPv6, gopacket.Default)
 	innerPacketPayload, err := t.TranslateIPv6(innerPacket, TranslationOverrides{
-		// Reverse the packet direction for the inner packet
-		SourceIP: dest,
-		// Do not decrement the TTL for the inner packet, as it is part of the error message
+		// Translate addresses normally, but preserve the quoted Hop Limit.
 		PreventTTLDecrement: true,
 	})
 	if err != nil {

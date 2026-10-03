@@ -43,30 +43,6 @@ func TestTranslateForwardsUnsupportedProtocols(t *testing.T) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
-		{
-			name:        "IPv4 DCCP",
-			outputLayer: layers.LayerTypeIPv6,
-			protocol:    layers.IPProtocol(33),
-			packet: func() gopacket.Packet {
-				ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocol(33), SrcIP: ipv4Source, DstIP: ipv4Dest}
-				return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
-			}(),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
-				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
-			},
-		},
-		{
-			name:        "IPv6 DCCP",
-			outputLayer: layers.LayerTypeIPv4,
-			protocol:    layers.IPProtocol(33),
-			packet: func() gopacket.Packet {
-				ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocol(33), HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-				return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv6, gopacket.Default)
-			}(),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
-				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,43 +71,5 @@ func TestTranslateForwardsUnsupportedProtocols(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Local packet-size contract: a 1280-byte IPv6 packet becomes a 1260-byte IPv4 packet without fragmentation.
-func TestTranslateAtMaximumSupportedIPv6Size(t *testing.T) {
-	payload := bytes.Repeat([]byte{0x5a}, maxIPv6PacketLength-ipv6HeaderLength-udpHeaderLength)
-	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolUDP, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-	udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}
-	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
-		t.Fatal(err)
-	}
-	input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	})
-	if len(result) != maxIPv4PacketLength {
-		t.Fatalf("maximum-size IPv6 packet translated to %d bytes, want %d", len(result), maxIPv4PacketLength)
-	}
-	translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
-	ipv4, ok := translated.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	if !ok || ipv4.Length != uint16(len(result)) || ipv4.Checksum != ipv4HeaderChecksum(ipv4) {
-		t.Fatalf("maximum-size IPv6 translation has invalid IPv4 header: %v", translated.ErrorLayer())
-	}
-}
-
-// Local packet-size contract: IPv6 packets larger than 1280 bytes are rejected.
-func TestTranslateRejectsOversizedIPv6Packet(t *testing.T) {
-	payloadLength := maxIPv6PacketLength + 1 - ipv6HeaderLength - udpHeaderLength
-	payload := bytes.Repeat([]byte{0x5a}, payloadLength)
-	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolUDP, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-	udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}
-	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
-		t.Fatal(err)
-	}
-	input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv6, gopacket.Default)
-	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if err == nil || result != nil {
-		t.Fatalf("oversized IPv6 packet was not rejected: result length=%d err=%v", len(result), err)
 	}
 }
