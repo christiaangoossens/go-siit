@@ -631,7 +631,11 @@ func (t *Translator) generateICMPv6ErrorData(payload []byte) []byte {
 	}
 
 	innerIP, ok := innerPacket.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-	if !ok || innerIP.NextHeader == layers.IPProtocolICMPv6 {
+	if !ok {
+		return nil
+	}
+
+	if innerIP.NextHeader == layers.IPProtocolICMPv6 && len(innerIP.Payload) > 0 && innerIP.Payload[0] >= 1 && innerIP.Payload[0] <= 4 {
 		return nil
 	}
 

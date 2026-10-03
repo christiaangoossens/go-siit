@@ -24,14 +24,13 @@ type TranslationOverrides struct {
 }
 
 var (
-	ErrInvalidPacket          = errors.New("Invalid packet")
-	ErrInvalidICMP            = errors.New("Invalid ICMP packet")
-	ErrUnsupportedProtocol    = errors.New("Unsupported protocol")
-	ErrICMPTranslationMissing = errors.New("ICMP translation is not implemented")
-	ErrTimeExceeded           = errors.New("TTL or Hop Limit expired")
-	ErrUnsupportedSrcIP       = errors.New("Unsupported source IP address")
-	ErrUnsupportedDestIP      = errors.New("Unsupported destination IP address")
-	ErrPacketOversized        = errors.New("Packet is too large to be translated without possible fragmentation")
+	ErrInvalidPacket       = errors.New("Invalid packet")
+	ErrInvalidICMP         = errors.New("Invalid ICMP packet")
+	ErrUnsupportedProtocol = errors.New("Unsupported protocol")
+	ErrTimeExceeded        = errors.New("TTL or Hop Limit expired")
+	ErrUnsupportedSrcIP    = errors.New("Unsupported source IP address")
+	ErrUnsupportedDestIP   = errors.New("Unsupported destination IP address")
+	ErrPacketOversized     = errors.New("Packet is too large to be translated without possible fragmentation")
 )
 
 type TranslationError struct {
@@ -245,13 +244,10 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 		return nil, nil
 	}
 
-	// Occurs when payload too short or malformed, truncated, or unsupported ICMP type
+	// A non-dropped nil ICMP payload indicates a malformed or structurally invalid packet.
 	if payload == nil {
 		if protocol == layers.IPProtocolICMPv6 {
-			if len(ip.Payload) < 8 {
-				return nil, ErrInvalidICMP
-			}
-			return nil, ErrICMPTranslationMissing
+			return nil, ErrInvalidICMP
 		}
 		return nil, fmt.Errorf("%w: IPv4 protocol %d payload", ErrInvalidPacket, protocol)
 	}
@@ -359,7 +355,16 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		}
 	}
 
+	// ICMPv6 errors may use the IPv4 router address when the outer IPv6
+	// destination cannot be mapped to an IPv4 address. This is allowed by RFC 7915
+	// Section 4.1, which states that the IPv4 router address may be used when the
+	// outer IPv6 destination is not mappable to an IPv4 address.
+	canUseDifferentDstIP := false
 	if protocol == layers.IPProtocolICMPv6 {
+		decodedICMP := gopacket.NewPacket(sanitizedPayload, layers.LayerTypeICMPv6, gopacket.Default)
+		icmp, ok := decodedICMP.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+		// RFC 4443 defines types 0-127 as errors and 128-255 as informational messages.
+		canUseDifferentDstIP = ok && icmp.TypeCode.Type() < 128
 		protocol = layers.IPProtocolICMPv4
 	}
 
@@ -388,9 +393,13 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		dstIP = overrides.DestinationIP
 	} else {
 		if !t.nat64Net.Contains(ip.DstIP) {
-			return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrInvalidPacket, ip.DstIP)
+			if !canUseDifferentDstIP {
+				return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrInvalidPacket, ip.DstIP)
+			}
+			dstIP = t.ipv4RouterAddress
+		} else {
+			dstIP = ip.DstIP[12:]
 		}
-		dstIP = ip.DstIP[12:]
 	}
 
 	ttl := t.decrementHopLimit(ip.HopLimit)
@@ -469,10 +478,7 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 
 	if payload == nil {
 		if protocol == layers.IPProtocolICMPv4 {
-			if len(ip.Payload) < 8 {
-				return nil, ErrInvalidICMP
-			}
-			return nil, ErrICMPTranslationMissing
+			return nil, ErrInvalidICMP
 		}
 		return nil, fmt.Errorf("%w: IPv6 protocol %d payload", ErrInvalidPacket, protocol)
 	}
