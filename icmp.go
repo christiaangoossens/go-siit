@@ -301,7 +301,12 @@ func (t *Translator) translateInnerIPv4(icmp *layers.ICMPv4) []byte {
 	binary.BigEndian.PutUint16(innerBytes[2:4], uint16(innerLength))
 	innerPacket := gopacket.NewPacket(innerBytes, layers.LayerTypeIPv4, gopacket.Default)
 	innerIP, ok := innerPacket.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	if !ok || innerIP.Protocol == layers.IPProtocolICMPv4 {
+	if !ok {
+		return nil
+	}
+
+	// If this is not echo request or echo reply, we don't translate the inner packet.
+	if innerIP.Protocol == layers.IPProtocolICMPv4 && (len(innerIP.Payload) < 1 || (innerIP.Payload[0] != layers.ICMPv4TypeEchoRequest && innerIP.Payload[0] != layers.ICMPv4TypeEchoReply)) {
 		return nil
 	}
 
