@@ -326,7 +326,7 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		return nil, fmt.Errorf("%w: invalid IPv6 header", ErrInvalidPacket)
 	}
 
-	// Check if TTL would be 0, if so geerate an ICMP Time Exceeded message back to the source of the original packet
+	// Check if TTL would be 0, if so generate an ICMP Time Exceeded message back to the source of the original packet
 	if ip.HopLimit <= 1 {
 		packet := t.generateIPv4TimeExceeded(ip)
 		return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet}
