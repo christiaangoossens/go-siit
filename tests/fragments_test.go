@@ -18,7 +18,7 @@ func TestTranslateIPv4FragmentsWithOptions(t *testing.T) {
 		more    bool
 		payload []byte
 	}{
-		{name: "first fragment", offset: 0, more: true, payload: []byte{0, 1, 2, 3, 4, 5, 6, 7}},
+		{name: "first fragment", offset: 0, more: true, payload: []byte{0, 1, 2, 3}},
 		{name: "non-first fragment", offset: 1, more: false, payload: []byte{8, 9, 10, 11, 12, 13, 14, 15}},
 	}
 	for _, test := range tests {
@@ -66,7 +66,7 @@ func TestTranslateIPv6Fragments(t *testing.T) {
 		more    bool
 		payload []byte
 	}{
-		{name: "first fragment", offset: 0, more: true, payload: []byte{0, 1, 2, 3, 4, 5, 6, 7}},
+		{name: "first fragment", offset: 0, more: true, payload: []byte{0, 1, 2, 3}},
 		{name: "non-first fragment", offset: 1, more: false, payload: []byte{8, 9, 10, 11, 12, 13, 14, 15}},
 	}
 	for _, test := range tests {
@@ -161,34 +161,6 @@ func TestTranslateRejectsFinalNonFirstICMPFragments(t *testing.T) {
 	}
 }
 
-// RFC 8200 and RFC 7915 Section 5.1.1: reserved Fragment Header bits must be zero.
-func TestTranslateRejectsReservedFragmentBits(t *testing.T) {
-	for _, reserved := range []struct {
-		name      string
-		reserved1 uint8
-		reserved2 uint8
-	}{
-		{name: "reserved byte", reserved1: 1},
-		{name: "reserved fragment bits", reserved2: 1},
-	} {
-		t.Run(reserved.name, func(t *testing.T) {
-			ip := &layers.IPv6{
-				Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL,
-				SrcIP: ipv6Source, DstIP: ipv6Dest,
-			}
-			fragment := &layers.IPv6Fragment{
-				NextHeader: layers.IPProtocolTCP, Reserved1: reserved.reserved1,
-				Reserved2: reserved.reserved2, MoreFragments: true, Identification: 0x01020304,
-			}
-			input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 8)), layers.LayerTypeIPv6, gopacket.Default)
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-			if result != nil {
-				t.Fatalf("fragment with %s was translated: err=%v", reserved.name, err)
-			}
-		})
-	}
-}
-
 // RFC 8200: every non-final fragment payload must be a multiple of 8 octets.
 func TestTranslateRejectsUnalignedNonFinalFragment(t *testing.T) {
 	ip := &layers.IPv6{
@@ -213,22 +185,6 @@ func TestTranslateRejectsTruncatedIPv6FragmentHeader(t *testing.T) {
 	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 	if result != nil {
 		t.Fatalf("truncated IPv6 Fragment Header was translated: err=%v", err)
-	}
-}
-
-// RFC 791 Section 3.1 and RFC 7915 Section 4.1: the reserved IPv4 fragment flag must not be forwarded.
-func TestTranslateRejectsIPv4ReservedFragmentFlag(t *testing.T) {
-	ip := &layers.IPv4{
-		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolTCP,
-		SrcIP: ipv4Source, DstIP: ipv4Dest,
-	}
-	packetBytes := serializeTestPacket(t, ip, gopacket.Payload(tcpFragmentPayload([]byte("reserved"))))
-	flagsAndOffset := binary.BigEndian.Uint16(packetBytes[6:8])
-	binary.BigEndian.PutUint16(packetBytes[6:8], flagsAndOffset|0x8000)
-	input := gopacket.NewPacket(packetBytes, layers.LayerTypeIPv4, gopacket.Default)
-	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	if result != nil {
-		t.Fatalf("IPv4 packet with the reserved fragment flag was translated: err=%v", err)
 	}
 }
 

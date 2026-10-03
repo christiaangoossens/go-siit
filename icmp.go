@@ -290,6 +290,9 @@ func (t *Translator) translateInnerIPv4(icmp *layers.ICMPv4) []byte {
 
 	innerBytes := icmp.Payload[innerOffset : innerOffset+innerLength]
 	if innerLength < ipv4HeaderLength {
+		if len(innerBytes) > 0 && innerBytes[0]>>4 == 4 {
+			return nil
+		}
 		return append([]byte{}, innerBytes...)
 	}
 
@@ -620,7 +623,11 @@ func (t *Translator) generateICMPv6ErrorData(payload []byte) []byte {
 
 	innerPacket := gopacket.NewPacket(payload[innerOffset:innerOffset+innerLength], layers.LayerTypeIPv6, gopacket.Default)
 	if innerLength < ipv6HeaderLength {
-		return append([]byte{}, payload[innerOffset:innerOffset+innerLength]...)
+		innerBytes := payload[innerOffset : innerOffset+innerLength]
+		if len(innerBytes) > 0 && innerBytes[0]>>4 == 6 {
+			return nil
+		}
+		return append([]byte{}, innerBytes...)
 	}
 
 	innerIP, ok := innerPacket.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
