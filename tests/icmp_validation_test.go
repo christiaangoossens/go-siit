@@ -109,7 +109,7 @@ func TestTranslateRejectsInvalidICMPv6Codes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := ipv6ICMPPacket(t, test.messageType, 255, bytes.Repeat([]byte{0}, 8))
 			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-			if test.messageType == layers.ICMPv6TypeDestinationUnreachable {
+			if test.messageType == layers.ICMPv6TypeDestinationUnreachable || test.messageType == layers.ICMPv6TypeParameterProblem {
 				requireDropped(t, result, err)
 				return
 			}
