@@ -16,9 +16,10 @@ type Translator struct {
 	ipv4RouterAddress net.IP
 }
 
-type IPOverrides struct {
-	SourceIP      net.IP
-	DestinationIP net.IP
+type TranslationOverrides struct {
+	SourceIP            net.IP
+	DestinationIP       net.IP
+	PreventTTLDecrement bool
 }
 
 var (
@@ -96,7 +97,7 @@ func (t *Translator) mapIPv4ToIPv6(ipv4 net.IP) net.IP {
 }
 
 // TranslateIPv4 translates an IPv4 packet to IPv6.
-func (t *Translator) TranslateIPv4(packet gopacket.Packet, ipOverrides IPOverrides) ([]byte, error) {
+func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides TranslationOverrides) ([]byte, error) {
 	// Translate an IPv4 packet to an IPv6 packet
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	if ipLayer == nil {
@@ -120,16 +121,21 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, ipOverrides IPOverrid
 
 	// If IP overrides are provided, use them; otherwise, map the addresses
 	var srcIP, dstIP net.IP
-	if ipOverrides.SourceIP != nil {
-		srcIP = ipOverrides.SourceIP
+	if overrides.SourceIP != nil {
+		srcIP = overrides.SourceIP
 	} else {
 		srcIP = t.mapIPv4ToIPv6(ip.SrcIP)
 	}
 
-	if ipOverrides.DestinationIP != nil {
-		dstIP = ipOverrides.DestinationIP
+	if overrides.DestinationIP != nil {
+		dstIP = overrides.DestinationIP
 	} else {
 		dstIP = t.mapIPv4ToIPv6(ip.DstIP)
+	}
+
+	ttl := decrementHopLimit(ip.TTL)
+	if overrides.PreventTTLDecrement == true {
+		ttl = ip.TTL
 	}
 
 	// Create a new IPv6 packet that matches the IPv4 Packet without any payload
@@ -138,7 +144,7 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, ipOverrides IPOverrid
 		TrafficClass: ip.TOS,
 		FlowLabel:    0,
 		NextHeader:   protocol,
-		HopLimit:     decrementHopLimit(ip.TTL),
+		HopLimit:     ttl,
 		SrcIP:        srcIP,
 		DstIP:        dstIP,
 	}
@@ -290,7 +296,7 @@ func translateUDPv4(ip *layers.IPv6, payload []byte) []byte {
 }
 
 // TranslateIPv6 translates an IPv6 packet to IPv4.
-func (t *Translator) TranslateIPv6(packet gopacket.Packet, ipOverrides IPOverrides) ([]byte, error) {
+func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides TranslationOverrides) ([]byte, error) {
 	// Translate an IPv6 packet to an IPv4 packet
 	ipLayer := packet.Layer(layers.LayerTypeIPv6)
 	if ipLayer == nil {
@@ -311,8 +317,8 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, ipOverrides IPOverrid
 
 	// Determine source IP
 	var srcIP net.IP
-	if ipOverrides.SourceIP != nil {
-		srcIP = ipOverrides.SourceIP
+	if overrides.SourceIP != nil {
+		srcIP = overrides.SourceIP
 	} else if t.nat64Net.Contains(ip.SrcIP) {
 		srcIP = ip.SrcIP[12:]
 	} else {
@@ -321,13 +327,18 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, ipOverrides IPOverrid
 
 	// Determine destination IP
 	var dstIP net.IP
-	if ipOverrides.DestinationIP != nil {
-		dstIP = ipOverrides.DestinationIP
+	if overrides.DestinationIP != nil {
+		dstIP = overrides.DestinationIP
 	} else {
 		if !t.nat64Net.Contains(ip.DstIP) {
 			return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrInvalidPacket, ip.DstIP)
 		}
 		dstIP = ip.DstIP[12:]
+	}
+
+	ttl := decrementHopLimit(ip.HopLimit)
+	if overrides.PreventTTLDecrement == true {
+		ttl = ip.HopLimit
 	}
 
 	// Create a new IPv4 packet that matches the IPv6 Packet without any payload
@@ -339,7 +350,7 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, ipOverrides IPOverrid
 		Id:         0, // Overwritten for fragments
 		Flags:      0, // Overwritten for fragments
 		FragOffset: 0, // Overwritten for fragments
-		TTL:        decrementHopLimit(ip.HopLimit),
+		TTL:        ttl,
 		Protocol:   protocol,
 		SrcIP:      srcIP,
 		DstIP:      dstIP,
@@ -594,9 +605,11 @@ func (t *Translator) generateICMPv6Error(typeNr byte, code byte, dest net.IP, pa
 
 func (t *Translator) generateICMPv6ErrorData(dest net.IP, payload []byte) []byte {
 	innerPacket := gopacket.NewPacket(payload[8:], layers.LayerTypeIPv6, gopacket.Default)
-	innerPacketPayload, err := t.TranslateIPv6(innerPacket, IPOverrides{
+	innerPacketPayload, err := t.TranslateIPv6(innerPacket, TranslationOverrides{
 		// Reverse the packet direction for the inner packet
 		SourceIP: dest,
+		// Do not decrement the TTL for the inner packet, as it is part of the error message
+		PreventTTLDecrement: true,
 	})
 	if err != nil {
 		return nil

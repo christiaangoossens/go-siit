@@ -1,0 +1,196 @@
+package siit_test
+
+import (
+	"encoding/binary"
+	"testing"
+
+	siit "github.com/christiaangoossens/go-siit"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+)
+
+// RFC 7915 Sections 5.2 and 5.3: IPv6 Destination Unreachable and Time Exceeded codes map to ICMPv4 errors.
+func TestTranslateICMPv6ErrorMappings(t *testing.T) {
+	cases := []struct {
+		name     string
+		typeCode layers.ICMPv6TypeCode
+		wantType uint8
+		wantCode uint8
+	}{
+		{name: "no route", typeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 0), wantType: icmpv4DestUnreachable, wantCode: 1},
+		{name: "administratively prohibited", typeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 1), wantType: icmpv4DestUnreachable, wantCode: 10},
+		{name: "beyond source scope", typeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 2), wantType: icmpv4DestUnreachable, wantCode: 1},
+		{name: "address unreachable", typeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 3), wantType: icmpv4DestUnreachable, wantCode: 1},
+		{name: "port unreachable", typeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 4), wantType: icmpv4DestUnreachable, wantCode: 3},
+		{name: "time exceeded", typeCode: layers.CreateICMPv6TypeCode(icmpv6TimeExceeded, 0), wantType: icmpv4TimeExceeded, wantCode: 0},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			outer := &layers.IPv6{
+				Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL,
+				SrcIP: ipv6Source, DstIP: ipv6Dest,
+			}
+			icmp := &layers.ICMPv6{TypeCode: test.typeCode}
+			if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
+				t.Fatal(err)
+			}
+			inner := ipv6TCPPacket(t, defaultTTL)
+			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv6, gopacket.Default)
+			result := mustTranslate(t, func() ([]byte, error) {
+				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			})
+			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			translated, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+			if !ok {
+				t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())
+			}
+			if translated.TypeCode.Type() != test.wantType || translated.TypeCode.Code() != test.wantCode {
+				t.Fatalf("got ICMPv4 type/code %d/%d, want %d/%d", translated.TypeCode.Type(), translated.TypeCode.Code(), test.wantType, test.wantCode)
+			}
+			if translated.Checksum != recalculatedICMPv4Checksum(t, translated) {
+				t.Fatalf("got invalid ICMPv4 checksum: %#x", translated.Checksum)
+			}
+		})
+	}
+}
+
+// RFC 7915 Sections 5.2 and 7: Packet Too Big MTU values are reduced by the header-size difference.
+func TestTranslateICMPv6PacketTooBigMTUBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mtu  uint32
+		want uint16
+	}{
+		{name: "minimum IPv6 MTU", mtu: 1280, want: 1260},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mtu := make([]byte, 4)
+			binary.BigEndian.PutUint32(mtu, test.mtu)
+			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypePacketTooBig, 0, mtu, ipv6TCPPacket(t, defaultTTL).Data())
+			result := mustTranslate(t, func() ([]byte, error) {
+				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			})
+			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			icmp, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+			if !ok || icmp.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 4) || icmp.Seq != test.want {
+				t.Fatalf("got ICMPv4 Packet Too Big translation %#v, want MTU %d", icmp, test.want)
+			}
+			if icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) {
+				t.Fatalf("translated Packet Too Big checksum is invalid: %#x", icmp.Checksum)
+			}
+		})
+	}
+}
+
+// RFC 7915 Sections 4.2 and 4.3: required IPv4 error codes are translated and Host Precedence Violation is dropped.
+func TestTranslateIPv4ICMPErrorMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		icmpType uint8
+		code     uint8
+		wantType uint8
+		wantCode uint8
+	}{
+		{name: "network unreachable", icmpType: 3, code: 0, wantType: 1, wantCode: 0},
+		{name: "host unreachable", icmpType: 3, code: 1, wantType: 1, wantCode: 0},
+		{name: "protocol unreachable", icmpType: 3, code: 2, wantType: 4, wantCode: 1},
+		{name: "port unreachable", icmpType: 3, code: 3, wantType: 1, wantCode: 4},
+		{name: "fragmentation needed", icmpType: 3, code: 4, wantType: 2, wantCode: 0},
+		{name: "source route failed", icmpType: 3, code: 5, wantType: 1, wantCode: 0},
+		{name: "network unknown", icmpType: 3, code: 6, wantType: 1, wantCode: 0},
+		{name: "host unknown", icmpType: 3, code: 7, wantType: 1, wantCode: 0},
+		{name: "isolated", icmpType: 3, code: 8, wantType: 1, wantCode: 0},
+		{name: "network administratively prohibited", icmpType: 3, code: 9, wantType: 1, wantCode: 1},
+		{name: "host administratively prohibited", icmpType: 3, code: 10, wantType: 1, wantCode: 1},
+		{name: "network unreachable for service", icmpType: 3, code: 11, wantType: 1, wantCode: 0},
+		{name: "host unreachable for service", icmpType: 3, code: 12, wantType: 1, wantCode: 0},
+		{name: "communication administratively prohibited", icmpType: 3, code: 13, wantType: 1, wantCode: 1},
+		{name: "host precedence violation", icmpType: 3, code: 14},
+		{name: "precedence cutoff", icmpType: 3, code: 15, wantType: 1, wantCode: 1},
+		{name: "time exceeded", icmpType: 11, code: 0, wantType: 3, wantCode: 0},
+		{name: "time exceeded in transit", icmpType: 11, code: 1, wantType: 3, wantCode: 1},
+		{name: "parameter problem", icmpType: 12, code: 0, wantType: 4, wantCode: 0},
+		{name: "parameter problem bad length", icmpType: 12, code: 2, wantType: 4, wantCode: 0},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			outer := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
+			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(test.icmpType, test.code)}
+			inner := ipv4TCPPacket(t, defaultTTL)
+			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv4, gopacket.Default)
+			if test.icmpType == icmpv4DestUnreachable && test.code == 14 {
+				result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+				if err != nil || result != nil {
+					t.Fatalf("host precedence violation was not silently dropped: result length=%d err=%v", len(result), err)
+				}
+				return
+			}
+			result := mustTranslate(t, func() ([]byte, error) {
+				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			})
+			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+			translated, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+			if !ok {
+				t.Fatalf("missing translated ICMPv6 layer: %v", packet.ErrorLayer())
+			}
+			if translated.TypeCode.Type() != test.wantType || translated.TypeCode.Code() != test.wantCode {
+				t.Fatalf("got ICMPv6 type/code %d/%d, want %d/%d", translated.TypeCode.Type(), translated.TypeCode.Code(), test.wantType, test.wantCode)
+			}
+			if translated.Checksum != recalculatedICMPv6Checksum(t, packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6), translated) {
+				t.Fatalf("got invalid ICMPv6 checksum: %#x", translated.Checksum)
+			}
+		})
+	}
+}
+
+// RFC 7915 Sections 5.2 and 5.3: IPv6 Packet Too Big and Parameter Problem require translation to ICMPv4.
+func TestTranslateIPv6ICMPErrorMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		icmpType uint8
+		code     uint8
+		wantType uint8
+		wantCode uint8
+	}{
+		{name: "packet too big", icmpType: 2, code: 0, wantType: 3, wantCode: 4},
+		{name: "time exceeded in transit", icmpType: 3, code: 1, wantType: 11, wantCode: 1},
+		{name: "parameter problem", icmpType: 4, code: 0, wantType: 12, wantCode: 0},
+		{name: "unrecognized next header", icmpType: 4, code: 1, wantType: 3, wantCode: 2},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			outer := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+			icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(test.icmpType, test.code)}
+			if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
+				t.Fatal(err)
+			}
+			inner := ipv6TCPPacket(t, defaultTTL)
+			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv6, gopacket.Default)
+			result := mustTranslate(t, func() ([]byte, error) {
+				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			})
+			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			translated, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+			if !ok {
+				t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())
+			}
+			if translated.TypeCode.Type() != test.wantType || translated.TypeCode.Code() != test.wantCode {
+				t.Fatalf("got ICMPv4 type/code %d/%d, want %d/%d", translated.TypeCode.Type(), translated.TypeCode.Code(), test.wantType, test.wantCode)
+			}
+			if translated.Checksum != recalculatedICMPv4Checksum(t, translated) {
+				t.Fatalf("got invalid ICMPv4 checksum: %#x", translated.Checksum)
+			}
+		})
+	}
+}
+
+// RFC 7915 Sections 4.2 and 5.2: unsupported ICMP error codes are silently dropped.
+func TestTranslateDropsUnsupportedICMPErrorCodes(t *testing.T) {
+	ipv4 := ipv4ICMPPacket(t, layers.ICMPv4TypeParameterProblem, 1, make([]byte, 8))
+	result, err := testTranslator().TranslateIPv4(ipv4, siit.TranslationOverrides{})
+	requireDropped(t, result, err)
+
+	ipv6 := ipv6ICMPPacket(t, layers.ICMPv6TypeParameterProblem, 2, make([]byte, 8))
+	result, err = testTranslator().TranslateIPv6(ipv6, siit.TranslationOverrides{})
+	requireDropped(t, result, err)
+}
