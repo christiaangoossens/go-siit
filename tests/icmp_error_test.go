@@ -106,6 +106,42 @@ func TestTranslateIPv6ICMPErrorPreservesQuotedEcho(t *testing.T) {
 	}
 }
 
+func TestTranslateIPv6ICMPErrorUsesMappedOuterDestinationInQuote(t *testing.T) {
+	outerDestination := net.ParseIP("2001:db8::2")
+	outer := &layers.IPv6{
+		Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL,
+		SrcIP: ipv6Source, DstIP: outerDestination,
+	}
+	outerICMP := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 0)}
+	if err := outerICMP.SetNetworkLayerForChecksum(outer); err != nil {
+		t.Fatal(err)
+	}
+	innerIP := &layers.IPv6{
+		Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL,
+		SrcIP: outerDestination, DstIP: ipv4TranslatedDest,
+	}
+	innerICMP := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(layers.ICMPv6TypeEchoRequest, 0)}
+	if err := innerICMP.SetNetworkLayerForChecksum(innerIP); err != nil {
+		t.Fatal(err)
+	}
+	inner := serializeTestPacket(t, innerIP, innerICMP, gopacket.Payload([]byte{0, 0, 0, 0, 'i', 'c', 'm', 'p'}))
+	input := gopacket.NewPacket(serializeTestPacket(t, outer, outerICMP, gopacket.Payload(inner)), layers.LayerTypeIPv6, gopacket.Default)
+	result := mustTranslate(t, func() ([]byte, error) {
+		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{DestinationIP: ipv4Source})
+	})
+
+	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+	translated, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if !ok {
+		t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())
+	}
+	quoted := gopacket.NewPacket(translated.Payload, layers.LayerTypeIPv4, gopacket.Default)
+	quotedIP, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if !ok || !quotedIP.SrcIP.Equal(ipv4Source) {
+		t.Fatalf("quoted source is %s, want %s", quotedIP.SrcIP, ipv4Source)
+	}
+}
+
 // RFC 7915 Sections 5.2 and 5.3: IPv6 Destination Unreachable and Time Exceeded codes map to ICMPv4 errors.
 func TestTranslateICMPv6ErrorMappings(t *testing.T) {
 	cases := []struct {

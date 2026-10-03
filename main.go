@@ -427,7 +427,7 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 
 	switch protocol {
 	case layers.IPProtocolICMPv4:
-		payload, dropped = t.translateICMPv6(dstIP, ip.Payload)
+		payload, dropped = t.translateICMPv6(ip.DstIP, dstIP, ip.Payload)
 	case layers.IPProtocolTCP:
 		payload = t.translateTCPv6(ipv4, sanitizedPayload)
 	case layers.IPProtocolUDP:
