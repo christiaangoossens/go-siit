@@ -329,7 +329,7 @@ func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint3
 
 	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(4, 0)}
 	if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
-		return TranslatedPacket{}
+		return TranslatedPacket{SrcIP: outer.SrcIP, DstIP: outer.DstIP}
 	}
 
 	pointerBytes := make([]byte, 4)
@@ -338,7 +338,8 @@ func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint3
 }
 
 func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket {
-	destination := t.mapIPv4ToIPv6(ip.SrcIP)
+	quotedSource := t.mapIPv4ToIPv6(ip.SrcIP)
+	quotedDestination := t.mapIPv4ToIPv6(ip.DstIP)
 	protocol := ip.Protocol
 
 	if protocol == layers.IPProtocolICMPv4 {
@@ -347,18 +348,18 @@ func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket 
 
 	inner := &layers.IPv6{
 		Version: 6, NextHeader: protocol, HopLimit: ip.TTL,
-		TrafficClass: ip.TOS, SrcIP: t.mapIPv4ToIPv6(ip.SrcIP), DstIP: t.mapIPv4ToIPv6(ip.DstIP),
+		TrafficClass: ip.TOS, SrcIP: quotedSource, DstIP: quotedDestination,
 	}
 
 	innerBytes := t.serializePacket(inner, gopacket.Payload(ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)]))
 	outer := &layers.IPv6{
 		Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: 64,
-		SrcIP: t.mapIPv4ToIPv6(t.ipv4RouterAddress), DstIP: destination,
+		SrcIP: t.mapIPv4ToIPv6(t.ipv4RouterAddress), DstIP: quotedSource,
 	}
 
 	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(3, 0)}
 	if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
-		return TranslatedPacket{}
+		return TranslatedPacket{SrcIP: outer.SrcIP, DstIP: outer.DstIP}
 	}
 
 	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(innerBytes))
@@ -366,10 +367,11 @@ func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket 
 
 func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket {
 	if !t.hasIPv6ToIPv4Mapping(ip.SrcIP) {
-		return TranslatedPacket{}
+		return TranslatedPacket{SrcIP: t.ipv4RouterAddress}
 	}
 
 	destination := t.mapIPv6ToIPv4(ip.SrcIP)
+	quotedDestination := t.mapIPv6ToIPv4(ip.DstIP)
 
 	protocol := ip.NextHeader
 	if protocol == layers.IPProtocolICMPv6 {
@@ -378,7 +380,7 @@ func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket 
 
 	inner := &layers.IPv4{
 		Version: 4, IHL: 5, Protocol: protocol, TTL: ip.HopLimit,
-		TOS: ip.TrafficClass, SrcIP: destination, DstIP: t.mapIPv6ToIPv4(ip.DstIP),
+		TOS: ip.TrafficClass, SrcIP: destination, DstIP: quotedDestination,
 	}
 
 	innerBytes := t.serializePacket(inner, gopacket.Payload(ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)]))

@@ -119,6 +119,9 @@ func TestTranslateIPv6RejectsInvalidTransportChecksums(t *testing.T) {
 			if result.Packet != nil {
 				t.Fatalf("IPv6 packet with an invalid %s checksum was translated: err=%v", test.name, err)
 			}
+			if !result.SrcIP.Equal(ipv4RouterAddress) || !result.DstIP.Equal(ipv6TranslatedDest) {
+				t.Fatalf("IPv6 packet metadata was not preserved for invalid %s checksum: %s -> %s", test.name, result.SrcIP, result.DstIP)
+			}
 		})
 	}
 }
@@ -202,6 +205,9 @@ func TestTranslateRejectsInvalidIPv4Checksums(t *testing.T) {
 			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 			if result.Packet != nil {
 				t.Fatalf("IPv4 packet with an invalid %s checksum was translated: err=%v", test.name, err)
+			}
+			if !result.SrcIP.Equal(ipv4TranslatedSource) || !result.DstIP.Equal(ipv4TranslatedDest) {
+				t.Fatalf("IPv4 packet metadata was not preserved for invalid %s checksum: %s -> %s", test.name, result.SrcIP, result.DstIP)
 			}
 		})
 	}
