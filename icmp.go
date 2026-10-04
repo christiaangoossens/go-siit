@@ -14,6 +14,7 @@ const (
 	ipv4HeaderLength            = 20
 	ipv6HeaderLength            = 40
 	ipv6FragmentHeaderLength    = 8
+	ipv4MaximumUnfragmentedSize = ipv6MinimumMTU - ipv6HeaderLength + ipv4HeaderLength
 	ipv4MinimumMTU              = 576
 	ipv6MinimumMTU              = 1280
 	ipv4ICMPErrorPayloadMaximum = ipv4MinimumMTU - ipv4HeaderLength - icmpErrorRestHeaderLength
@@ -117,7 +118,12 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 			// Translate to
 			//   an ICMPv6 Packet Too Big message (Type 2) with Code set
 			//   to 0.
-			return t.translateICMPErrorToV6(ip, 2, 0, payload), false
+			mtu := min(uint32(sequence)+ipv4HeaderLength, t.MTU)
+			if mtu < ipv6MinimumMTU {
+				// When translating, set the minimum to the IPv6 minimum.
+				mtu = ipv6MinimumMTU
+			}
+			return t.translateICMPErrorToV6(ip, 2, 0, payload, mtu), false
 		case 5:
 			// Code 5 (Source Route Failed):  Set the Code to 0 (No route
 			//   to destination).
@@ -394,6 +400,18 @@ func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket 
 	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(innerBytes))
 }
 
+func (t *Translator) generateIPv4SourceRouteFailed(ip *layers.IPv4) TranslatedPacket {
+	quoted := append([]byte{}, ip.Contents...)
+	quoted = append(quoted, ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)]...)
+
+	outer := &layers.IPv4{
+		Version: 4, IHL: 5, Protocol: layers.IPProtocolICMPv4, TTL: 64,
+		SrcIP: t.ipv4RouterAddress, DstIP: ip.SrcIP,
+	}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 5)}
+	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(quoted))
+}
+
 func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 	if len(payload) < 8 {
 		return nil, false
@@ -493,6 +511,13 @@ func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 		// Other ICMPv6 information & error types:  Silently drop.
 		return nil, true
 	}
+}
+
+func isICMPv6Error(payload []byte) bool {
+	decoded := gopacket.NewPacket(payload, layers.LayerTypeICMPv6, gopacket.Default)
+	icmp, ok := decoded.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	// RFC 4443 defines types 0-127 as errors and 128-255 as informational messages.
+	return ok && icmp.TypeCode.Type() < 128
 }
 
 func (t *Translator) translateICMPv6Echo(newType byte, payload []byte) []byte {

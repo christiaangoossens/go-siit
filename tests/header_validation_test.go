@@ -114,8 +114,8 @@ func TestTranslateIPv4OrdinaryOptions(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.1: an unexpired source-route option must cause the packet to be discarded.
-func TestTranslateRejectsIPv4SourceRouteOption(t *testing.T) {
+// RFC 7915 Sections 4.1 and 4.4: an unexpired source-route option is discarded and returns ICMPv4 Source Route Failed.
+func TestTranslateIPv4SourceRouteOptionReturnsICMPError(t *testing.T) {
 	ip := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolTCP,
 		SrcIP: ipv4Source, DstIP: ipv4Dest,
@@ -126,8 +126,25 @@ func TestTranslateRejectsIPv4SourceRouteOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, tcp), layers.LayerTypeIPv4, gopacket.Default)
-	if result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}); err != nil || result.Packet != nil {
-		t.Fatalf("IPv4 source-route packet %s -> %s was not silently dropped: result length=%d err=%v", ip.SrcIP, ip.DstIP, len(result.Packet), err)
+	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	if err != nil {
+		t.Fatalf("IPv4 source-route packet returned an error: %v", err)
+	}
+	packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
+	outer, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if !ok || !outer.SrcIP.Equal(ipv4RouterAddress) || !outer.DstIP.Equal(ipv4Source) || outer.Protocol != layers.IPProtocolICMPv4 {
+		t.Fatalf("unexpected source-route error IPv4 header: %+v", outer)
+	}
+	icmp, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if !ok || icmp.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 5) {
+		t.Fatalf("unexpected source-route error ICMP: %+v", icmp)
+	}
+	if icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) {
+		t.Fatalf("source-route error checksum is invalid: %#x", icmp.Checksum)
+	}
+	quoted := gopacket.NewPacket(icmp.Payload, layers.LayerTypeIPv4, gopacket.Default)
+	if quotedIP, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4); !ok || !quotedIP.SrcIP.Equal(ipv4Source) || !quotedIP.DstIP.Equal(ipv4Dest) || len(quotedIP.Options) == 0 {
+		t.Fatalf("source-route error did not quote the original IPv4 header: %v", quoted.ErrorLayer())
 	}
 }
 

@@ -225,6 +225,51 @@ func TestTranslateDropsFragmentFollowedByExtensionHeader(t *testing.T) {
 	}
 }
 
+// RFC 7915 Section 5.1.1: a Fragment Header followed by AH must be dropped.
+func TestTranslateDropsFragmentFollowedByAuthenticationHeader(t *testing.T) {
+	ip := &layers.IPv6{
+		Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL,
+		SrcIP: ipv6Source, DstIP: ipv6Dest,
+	}
+	fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolAH, Identification: 0x01020304}
+	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 8)), layers.LayerTypeIPv6, gopacket.Default)
+	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	if result.Packet != nil {
+		t.Fatalf("fragment followed by AH was translated: err=%v", err)
+	}
+}
+
+// RFC 7915 Section 5.1.1: known IPv6 extension headers without gopacket layer types are also dropped.
+func TestTranslateDropsFragmentFollowedByMobilityHeader(t *testing.T) {
+	ip := &layers.IPv6{
+		Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL,
+		SrcIP: ipv6Source, DstIP: ipv6Dest,
+	}
+	fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocol(135), Identification: 0x01020304}
+	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 8)), layers.LayerTypeIPv6, gopacket.Default)
+	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	if result.Packet != nil {
+		t.Fatalf("fragment followed by Mobility Header was translated: err=%v", err)
+	}
+}
+
+// RFC 7915 Section 5.1.1: ESP is the exception and may follow an IPv6 Fragment Header.
+func TestTranslateFragmentFollowedByESP(t *testing.T) {
+	ip := &layers.IPv6{
+		Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL,
+		SrcIP: ipv6Source, DstIP: ipv6Dest,
+	}
+	fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolESP, Identification: 0x01020304}
+	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 8)), layers.LayerTypeIPv6, gopacket.Default)
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	})
+	translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if translated.Protocol != layers.IPProtocolESP || translated.FragOffset != 0 {
+		t.Fatalf("unexpected ESP fragment translation: %+v", translated)
+	}
+}
+
 func tcpFragmentPayload(payload []byte) []byte {
 	segment := make([]byte, 20+len(payload))
 	binary.BigEndian.PutUint16(segment[0:2], uint16(testSourcePort))

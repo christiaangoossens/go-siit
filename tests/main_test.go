@@ -44,6 +44,7 @@ func TestTranslateIPv6ToIPv4TCPUsesRFC6052Mapping(t *testing.T) {
 	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(ipv6TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
 	})
+
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
 	ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	if !ok {
@@ -65,6 +66,34 @@ func TestTranslateIPv6ToIPv4TCPUsesRFC6052Mapping(t *testing.T) {
 	expected := recalculatedTCPChecksum(t, ip, tcp)
 	if tcp.Checksum != expected {
 		t.Fatalf("incorrect translated TCP checksum: got %#x, want %#x", tcp.Checksum, expected)
+	}
+}
+
+// RFC 7915 Section 5.1: IPv4 packets up to 1260 bytes clear DF; larger packets set DF.
+func TestTranslateIPv6ToIPv4SetsDontFragmentAbove1260Bytes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		payloadLen int
+		wantDF     bool
+	}{
+		{name: "at threshold", payloadLen: 1260 - ipv4HeaderLength, wantDF: false},
+		{name: "above threshold", payloadLen: 1261 - ipv4HeaderLength, wantDF: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ip := &layers.IPv6{
+				Version: 6, NextHeader: layers.IPProtocol(47), HopLimit: defaultTTL,
+				SrcIP: ipv6Source, DstIP: ipv6Dest,
+			}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.payloadLen))), layers.LayerTypeIPv6, gopacket.Default)
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			})
+			translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+			gotDF := translated.Flags&layers.IPv4DontFragment != 0
+			if gotDF != test.wantDF || translated.Length != uint16(20+test.payloadLen) {
+				t.Fatalf("unexpected IPv4 size/DF: length=%d DF=%t", translated.Length, gotDF)
+			}
+		})
 	}
 }
 

@@ -44,5 +44,9 @@ type TranslatedPacket struct {
 
 You can use the src & dest IPs for logging. They are also returned on error (whenever possible).
 
+## Notes
+
+This library intentionally omits some RFC 7915 `SHOULD`-level ICMP error responses for discarded packets (Sections 4.4 and 5.4). Those packets are silently dropped instead. Mandatory ICMP translations and protocol-specific error responses remain implemented; ICMP error emission cannot currently be configured or rate-limited.
+
 ## AI-declaration
 Test suite is AI-assisted programming with manual review. The main library itself is manually written (with AI review/suggestions only).

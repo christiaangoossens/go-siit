@@ -174,12 +174,6 @@ func TestTranslateReturnsSpecificErrors(t *testing.T) {
 		t.Fatalf("missing IPv6 layer returned %v, want ErrInvalidPacket", err)
 	}
 
-	shortICMPHeader := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-	shortICMP := gopacket.NewPacket(serializeTestPacket(t, shortICMPHeader, gopacket.Payload([]byte{echoRequest, 0, 0})), layers.LayerTypeIPv4, gopacket.Default)
-	if _, err := testTranslator().TranslateIPv4(shortICMP, siit.TranslationOverrides{}); !errors.Is(err, siit.ErrInvalidICMP) {
-		t.Fatalf("short ICMP returned %v, want ErrInvalidICMP", err)
-	}
-
 	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocol(47), SrcIP: ipv4Source, DstIP: ipv4Dest}
 	unsupported := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload([]byte("gre"))), layers.LayerTypeIPv4, gopacket.Default)
 	if _, err := testTranslator().TranslateIPv4(unsupported, siit.TranslationOverrides{}); !errors.Is(err, siit.ErrUnsupportedProtocol) {

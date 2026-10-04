@@ -24,8 +24,12 @@ func validTransportChecksum(network gopacket.NetworkLayer, protocol layers.IPPro
 
 	switch protocol {
 	case layers.IPProtocolTCP:
+		if len(payload) < transportHeaderLength(protocol) {
+			return false
+		}
+
 		transport, ok := decoded.Layer(layers.LayerTypeTCP).(*layers.TCP)
-		if !ok || decoded.ErrorLayer() != nil || transport.SetNetworkLayerForChecksum(network) != nil {
+		if !ok || transport.SetNetworkLayerForChecksum(network) != nil {
 			return false
 		}
 
@@ -36,15 +40,39 @@ func validTransportChecksum(network gopacket.NetworkLayer, protocol layers.IPPro
 
 		return transport.Checksum == original
 	case layers.IPProtocolUDP:
-		transport, ok := decoded.Layer(layers.LayerTypeUDP).(*layers.UDP)
-		if !ok || decoded.ErrorLayer() != nil || (network.LayerType() == layers.LayerTypeIPv6 && transport.Checksum == 0) || transport.SetNetworkLayerForChecksum(network) != nil {
+		if len(payload) < transportHeaderLength(protocol) {
 			return false
 		}
 
-		return true
+		transport, ok := decoded.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		if !ok {
+			return false
+		}
+
+		// RFC 768 Section 3: IPv4 UDP may omit its checksum.
+		if network.LayerType() == layers.LayerTypeIPv4 && transport.Checksum == 0 {
+			return true
+		} else if transport.Checksum == 0 {
+			return false
+		}
+
+		if transport.SetNetworkLayerForChecksum(network) != nil {
+			return false
+		}
+
+		original := transport.Checksum
+		if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true}, transport, gopacket.Payload(transport.Payload)); err != nil {
+			return false
+		}
+
+		return transport.Checksum == original
 	case layers.IPProtocolICMPv4:
+		if len(payload) < 8 {
+			return false
+		}
+
 		transport, ok := decoded.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-		if !ok || decoded.ErrorLayer() != nil {
+		if !ok {
 			return false
 		}
 
@@ -55,8 +83,12 @@ func validTransportChecksum(network gopacket.NetworkLayer, protocol layers.IPPro
 
 		return transport.Checksum == original
 	case layers.IPProtocolICMPv6:
+		if len(payload) < 8 {
+			return false
+		}
+
 		transport, ok := decoded.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-		if !ok || decoded.ErrorLayer() != nil || transport.SetNetworkLayerForChecksum(network) != nil {
+		if !ok || transport.SetNetworkLayerForChecksum(network) != nil {
 			return false
 		}
 
@@ -69,6 +101,16 @@ func validTransportChecksum(network gopacket.NetworkLayer, protocol layers.IPPro
 	default:
 		return true
 	}
+}
+
+func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
+	if protocol != layers.IPProtocolUDP || len(payload) < 8 {
+		return false
+	}
+
+	decoded := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
+	udp, ok := decoded.Layer(layers.LayerTypeUDP).(*layers.UDP)
+	return ok && udp.Checksum == 0
 }
 
 func transportLayerType(protocol layers.IPProtocol) gopacket.LayerType {

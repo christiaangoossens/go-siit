@@ -68,6 +68,69 @@ func TestTranslateIPv4ICMPErrorPreservesQuotedEcho(t *testing.T) {
 	}
 }
 
+// RFC 7915 Sections 4.2 and 7: IPv4 Fragmentation Needed becomes ICMPv6 Packet Too Big with an IPv6-sized MTU.
+func TestTranslateIPv4FragmentationNeededPreservesMinimumMTU(t *testing.T) {
+	inner := ipv4TCPPacket(t, defaultTTL).Data()
+	outer := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4,
+		SrcIP: ipv4Source, DstIP: ipv4Dest,
+	}
+	fragmentationNeeded := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 4),
+		Seq:      1200,
+	}
+	input := gopacket.NewPacket(serializeTestPacket(t, outer, fragmentationNeeded, gopacket.Payload(inner)), layers.LayerTypeIPv4, gopacket.Default)
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	})
+
+	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	if !ok {
+		t.Fatalf("missing translated IPv6 layer: %v", packet.ErrorLayer())
+	}
+	translated, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	if !ok || translated.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypePacketTooBig, 0) {
+		t.Fatalf("unexpected translated ICMPv6 Packet Too Big: %+v", translated)
+	}
+	if got := binary.BigEndian.Uint32(translated.Payload[:4]); got != 1280 {
+		t.Fatalf("translated MTU is %d, want 1280", got)
+	}
+	if translated.Checksum != recalculatedICMPv6Checksum(t, ip, translated) {
+		t.Fatalf("translated ICMPv6 checksum is invalid: %#x", translated.Checksum)
+	}
+}
+
+func TestTranslateIPv4FragmentationNeededAddsHeaderSizeToMTU(t *testing.T) {
+	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
+	if err != nil {
+		t.Fatal(err)
+	}
+	translator, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outer := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4,
+		SrcIP: ipv4Source, DstIP: ipv4Dest,
+	}
+	fragmentationNeeded := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 4),
+		Seq:      1400,
+	}
+	input := gopacket.NewPacket(serializeTestPacket(t, outer, fragmentationNeeded, gopacket.Payload(ipv4TCPPacket(t, defaultTTL).Data())), layers.LayerTypeIPv4, gopacket.Default)
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv4(input, siit.TranslationOverrides{})
+	})
+
+	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	translated := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	if got := binary.BigEndian.Uint32(translated.Payload[:4]); got != 1420 {
+		t.Fatalf("translated MTU is %d, want 1420", got)
+	}
+}
+
 func TestTranslateIPv6ICMPErrorPreservesQuotedEcho(t *testing.T) {
 	outer := &layers.IPv6{
 		Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL,
