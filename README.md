@@ -9,12 +9,12 @@ It also implements:
 ## Assumptions
 
 - The kernel handles routing, MTU enforcement, and packet fragmentation.
-- `Translator` receives IPv4 packets or fragments no larger than the configured maximum, including the IPv4 header.
-- `Translator` does not perform MTU-driven fragmentation or generate MTU errors.
+- `Translator` receives does not receive oversized packets. Fragmentation is already preformed if necessary.
+- `Translator` does not perform MTU-driven fragmentation.
 - We only support unicast packets.
-- We only support internet routable packets (not LAN-internal, such as discovery protocols)
+- We only support internet routable packets (not LAN-internal, such as discovery protocols).
 
-The default minimum link IPv6 MTU is 1280 bytes. For an unfragmented IPv4 packet, the maximum total IPv4 size is calculated as `MTU - 40 + 20`, so 1260 bytes is accepted by default. An already fragmented IPv4 packet additionally needs an 8-byte IPv6 Fragment header, so its maximum total IPv4 size is `MTU - 40 - 8 + 20`, or 1252 bytes by default (1232 bytes of IPv4 payload after the IPv4 header). An administrator who knows a larger path MTU is supported can set `Translator.MTU`; for example, 1500 permits 1480-byte unfragmented packets and 1472-byte fragmented packets. Packets within these boundaries should never need MTU-driven fragmentation in this library; the Linux kernel handles fragmentation outside these boundaries.
+The minimum link IPv6 MTU is 1280 bytes. For an unfragmented IPv4 packet, the maximum total IPv4 size is calculated as `MTU - 40 + 20`, so 1260 bytes is accepted by default. An already fragmented IPv4 packet additionally needs an 8-byte IPv6 Fragment header, so its maximum total IPv4 size is `MTU - 40 - 8 + 20`, or 1252 bytes by default (1232 bytes of IPv4 payload after the IPv4 header). An administrator who knows a larger path MTU is supported can set `Translator.MTU`; for example, 1500 permits 1480-byte unfragmented packets and 1472-byte fragmented packets.
 
 ## Usage
 
