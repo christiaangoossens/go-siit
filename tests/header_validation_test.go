@@ -12,13 +12,13 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// Local API contract: the translator requires a /96 NAT64 prefix and an IPv4 router address.
+// RFC 6052 Section 2.2: the NAT64 prefix uses one of the six permitted lengths.
 func TestNewTranslatorValidatesConfiguration(t *testing.T) {
 	_, validPrefix, err := net.ParseCIDR("64:ff9b::/96")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, shortPrefix, err := net.ParseCIDR("64:ff9b::/64")
+	_, unsupportedPrefix, err := net.ParseCIDR("64:ff9b::/80")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestNewTranslatorValidatesConfiguration(t *testing.T) {
 		routerAddr net.IP
 	}{
 		{name: "nil prefix", prefix: nil, routerAddr: ipv4RouterAddress},
-		{name: "non /96 prefix", prefix: shortPrefix, routerAddr: ipv4RouterAddress},
+		{name: "unsupported prefix length", prefix: unsupportedPrefix, routerAddr: ipv4RouterAddress},
 		{name: "nil router", prefix: validPrefix, routerAddr: nil},
 		{name: "IPv6 router", prefix: validPrefix, routerAddr: net.ParseIP("2001:db8::1")},
 	}
@@ -36,6 +36,55 @@ func TestNewTranslatorValidatesConfiguration(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := siit.NewTranslator(test.prefix, test.routerAddr, nil); err == nil {
 				t.Fatal("invalid translator configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestTranslateRFC6052NAT64PrefixLengths(t *testing.T) {
+	tests := []struct {
+		name       string
+		prefix     string
+		ipv4       string
+		expectedV6 string
+	}{
+		{name: "32", prefix: "2001:db8::/32", ipv4: "192.0.2.33", expectedV6: "2001:db8:c000:221::"},
+		{name: "40", prefix: "2001:db8:100::/40", ipv4: "192.0.2.33", expectedV6: "2001:db8:1c0:2:21::"},
+		{name: "48", prefix: "2001:db8:122::/48", ipv4: "192.0.2.33", expectedV6: "2001:db8:122:c000:2:2100::"},
+		{name: "56", prefix: "2001:db8:122:300::/56", ipv4: "192.0.2.33", expectedV6: "2001:db8:122:3c0:0:221::"},
+		{name: "64", prefix: "2001:db8:122:344::/64", ipv4: "192.0.2.33", expectedV6: "2001:db8:122:344:c0:2:2100::"},
+		{name: "96", prefix: "2001:db8:122:344::/96", ipv4: "192.0.2.33", expectedV6: "2001:db8:122:344::192.0.2.33"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, nat64Net, err := net.ParseCIDR(test.prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ipv4 := net.ParseIP(test.ipv4)
+			expectedV6 := net.ParseIP(test.expectedV6)
+			ipv4Input := ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4)
+			ipv4Result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				return translator.TranslateIPv4(ipv4Input, siit.TranslationOverrides{})
+			})
+			translatedV6 := gopacket.NewPacket(ipv4Result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+			if !translatedV6.SrcIP.Equal(expectedV6) || !translatedV6.DstIP.Equal(expectedV6) {
+				t.Fatalf("RFC 6052 mapping was incorrect: %s -> %s, want %s", ipv4, translatedV6.SrcIP, expectedV6)
+			}
+
+			ipv6Input := ipv6TCPPacketWithAddresses(t, defaultTTL, expectedV6, expectedV6)
+			ipv6Result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				return translator.TranslateIPv6(ipv6Input, siit.TranslationOverrides{})
+			})
+			translatedV4 := gopacket.NewPacket(ipv6Result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+			if !translatedV4.SrcIP.Equal(ipv4) || !translatedV4.DstIP.Equal(ipv4) {
+				t.Fatalf("RFC 6052 reverse mapping was incorrect: %s -> %s, want %s", expectedV6, translatedV4.SrcIP, ipv4)
 			}
 		})
 	}

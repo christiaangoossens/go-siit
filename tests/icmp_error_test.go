@@ -3,6 +3,7 @@ package siit_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 
@@ -142,6 +143,29 @@ func TestTranslateIPv6ICMPErrorUsesMappedOuterDestinationInQuote(t *testing.T) {
 		t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())
 	}
 	quoted := gopacket.NewPacket(translated.Payload, layers.LayerTypeIPv4, gopacket.Default)
+	quotedIP, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if !ok || !quotedIP.SrcIP.Equal(ipv4Source) {
+		t.Fatalf("quoted source is %s, want %s", quotedIP.SrcIP, ipv4Source)
+	}
+}
+
+func TestTranslateIPv6TimeExceededUsesEAMSourceMapping(t *testing.T) {
+	eamSource := net.ParseIP("2001:db8::2")
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::2/128"},
+	})
+	input := ipv6TCPPacketWithAddresses(t, 1, eamSource, ipv4TranslatedDest)
+	result, err := translator.TranslateIPv6(input, siit.TranslationOverrides{})
+	if !errors.Is(err, siit.ErrTimeExceeded) {
+		t.Fatalf("got error %v, want ErrTimeExceeded", err)
+	}
+
+	packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
+	ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if !ok || !ip.DstIP.Equal(ipv4Source) {
+		t.Fatalf("generated error destination is %s, want %s", ip.DstIP, ipv4Source)
+	}
+	quoted := gopacket.NewPacket(packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4).Payload, layers.LayerTypeIPv4, gopacket.Default)
 	quotedIP, ok := quoted.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	if !ok || !quotedIP.SrcIP.Equal(ipv4Source) {
 		t.Fatalf("quoted source is %s, want %s", quotedIP.SrcIP, ipv4Source)

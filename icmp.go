@@ -3,7 +3,6 @@ package siit
 import (
 	"encoding/binary"
 	"log"
-	"net"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -366,13 +365,11 @@ func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket 
 }
 
 func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket {
-	var destination net.IP
-
-	if t.nat64Net.Contains(ip.SrcIP) {
-		destination = ip.SrcIP[12:]
-	} else {
+	if !t.hasIPv6ToIPv4Mapping(ip.SrcIP) {
 		return TranslatedPacket{}
 	}
+
+	destination := t.mapIPv6ToIPv4(ip.SrcIP)
 
 	protocol := ip.NextHeader
 	if protocol == layers.IPProtocolICMPv6 {
@@ -381,7 +378,7 @@ func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket 
 
 	inner := &layers.IPv4{
 		Version: 4, IHL: 5, Protocol: protocol, TTL: ip.HopLimit,
-		TOS: ip.TrafficClass, SrcIP: destination, DstIP: ip.DstIP[12:],
+		TOS: ip.TrafficClass, SrcIP: destination, DstIP: t.mapIPv6ToIPv4(ip.DstIP),
 	}
 
 	innerBytes := t.serializePacket(inner, gopacket.Payload(ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)]))

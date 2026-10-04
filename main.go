@@ -56,14 +56,8 @@ func (e *TranslationError) Unwrap() error {
 // NewTranslator creates a SIIT translator with the addresses used for routing
 // and ICMP error generation.
 func NewTranslator(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTable RawEAMTable) (*Translator, error) {
-	// Check that NAT64 net is a /96 prefix
-	if nat64Net == nil || nat64Net.Mask == nil {
-		return nil, fmt.Errorf("Invalid NAT64 prefix: %v", nat64Net)
-	}
-
-	maskSize, _ := nat64Net.Mask.Size()
-	if maskSize != 96 {
-		return nil, fmt.Errorf("NAT64 prefix must be a /96 prefix, got: %v", nat64Net)
+	if err := validateRFC6052Prefix(nat64Net); err != nil {
+		return nil, err
 	}
 
 	// Check that the IPv4 router address is a valid IPv4 address
