@@ -34,7 +34,7 @@ func TestNewTranslatorValidatesConfiguration(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := siit.NewTranslator(test.prefix, test.routerAddr); err == nil {
+			if _, err := siit.NewTranslator(test.prefix, test.routerAddr, nil); err == nil {
 				t.Fatal("invalid translator configuration was accepted")
 			}
 		})
@@ -56,7 +56,7 @@ func TestTranslateIPv4OrdinaryOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, tcp), layers.LayerTypeIPv4, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -77,8 +77,8 @@ func TestTranslateRejectsIPv4SourceRouteOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, tcp), layers.LayerTypeIPv4, gopacket.Default)
-	if result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}); err != nil || result != nil {
-		t.Fatalf("IPv4 source-route packet %s -> %s was not silently dropped: result length=%d err=%v", ip.SrcIP, ip.DstIP, len(result), err)
+	if result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}); err != nil || result.Packet != nil {
+		t.Fatalf("IPv4 source-route packet %s -> %s was not silently dropped: result length=%d err=%v", ip.SrcIP, ip.DstIP, len(result.Packet), err)
 	}
 }
 
@@ -112,7 +112,7 @@ func TestTranslateIPv6ZeroSegmentExtensions(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			input := ipv6PacketWithExtension(t, test.extensionType, 0)
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			requireIPv6ExtensionSkipped(t, result)
@@ -123,7 +123,7 @@ func TestTranslateIPv6ZeroSegmentExtensions(t *testing.T) {
 // RFC 7915 Section 5.1: IPv6 Hop-by-Hop extension headers are ignored while translating to IPv4.
 func TestTranslateIgnoresIPv6HopByHop(t *testing.T) {
 	input := ipv6PacketWithExtension(t, layers.IPProtocolIPv6HopByHop, 0)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 	requireIPv6ExtensionSkipped(t, result)
@@ -152,10 +152,10 @@ func TestTranslateRejectsNonzeroSegmentRouting(t *testing.T) {
 	if err == nil {
 		t.Fatal("nonzero-segment IPv6 routing header was accepted")
 	}
-	if result == nil {
+	if result.Packet == nil {
 		t.Fatalf("routing header rejection did not return an ICMPv6 Parameter Problem: %v", err)
 	}
-	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
 	icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
 	if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(4, 0) {
 		t.Fatalf("routing header rejection returned the wrong ICMPv6 error: %v", packet.ErrorLayer())
@@ -172,7 +172,7 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 		packet    []byte
 		layer     gopacket.LayerType
 		lengthAt  int
-		translate func(*siit.Translator, gopacket.Packet) ([]byte, error)
+		translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
 	}{
 		{
 			name: "IPv4 total length",
@@ -180,7 +180,7 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 				return ipv4TCPPacket(t, defaultTTL).Data()
 			}(),
 			layer: layers.LayerTypeIPv4, lengthAt: 2,
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
@@ -190,7 +190,7 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 				return ipv6TCPPacket(t, defaultTTL).Data()
 			}(),
 			layer: layers.LayerTypeIPv6, lengthAt: 4,
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
@@ -212,82 +212,82 @@ func TestTranslateRejectsIllegalAddressMatrix(t *testing.T) {
 	tests := []struct {
 		name      string
 		packet    gopacket.Packet
-		translate func(*siit.Translator, gopacket.Packet) ([]byte, error)
+		translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
 	}{
 		{
 			name:   "IPv4 unspecified source",
 			packet: ipv4TCPPacketWithAddresses(t, defaultTTL, net.IPv4zero, ipv4Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv4 multicast source",
 			packet: ipv4TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("224.0.0.1"), ipv4Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv4 multicast destination",
 			packet: ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, net.ParseIP("224.0.0.1")),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv4 broadcast destination",
 			packet: ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, net.IPv4bcast),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv4 broadcast source",
 			packet: ipv4TCPPacketWithAddresses(t, defaultTTL, net.IPv4bcast, ipv4Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 unspecified source",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, net.IPv6zero, ipv6Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 multicast source",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("ff02::1"), ipv6Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 unspecified destination",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, net.IPv6zero),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 multicast destination",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, net.ParseIP("ff02::1")),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 link-local source",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("fe80::1"), ipv6Dest),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:   "IPv6 link-local destination",
 			packet: ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, net.ParseIP("fe80::1")),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
@@ -295,14 +295,14 @@ func TestTranslateRejectsIllegalAddressMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := test.translate(testTranslator(), test.packet)
-			if err == nil || result != nil {
+			if err == nil || result.Packet != nil {
 				address := "unknown"
 				if ip, ok := test.packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4); ok {
 					address = fmt.Sprintf("%s -> %s", ip.SrcIP, ip.DstIP)
 				} else if ip, ok := test.packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6); ok {
 					address = fmt.Sprintf("%s -> %s", ip.SrcIP, ip.DstIP)
 				}
-				t.Fatalf("illegal address %s was not rejected: result length=%d err=%v", address, len(result), err)
+				t.Fatalf("illegal address %s was not rejected: result length=%d err=%v", address, len(result.Packet), err)
 			}
 		})
 	}

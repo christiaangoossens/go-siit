@@ -28,7 +28,9 @@ func TestTranslateICMPEchoBothDirections(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
 			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(test.messageType, 0), Id: test.messageID, Seq: test.sequence}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(test.payload)), layers.LayerTypeIPv4, gopacket.Default)
-			translated6 := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}) })
+			translated6 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			})
 			packet6 := gopacket.NewPacket(translated6, layers.LayerTypeIPv6, gopacket.Default)
 			icmp6, ok := packet6.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
 			if !ok || icmp6.TypeCode.Type() != test.ipv6Type || icmp6.Checksum == 0 {
@@ -42,7 +44,9 @@ func TestTranslateICMPEchoBothDirections(t *testing.T) {
 				t.Fatalf("IPv4 ICMP %s checksum is invalid: %#x", test.name, icmp6.Checksum)
 			}
 
-			translated4 := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{}) })
+			translated4 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{})
+			})
 			packet4 := gopacket.NewPacket(translated4, layers.LayerTypeIPv4, gopacket.Default)
 			icmp4, ok := packet4.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 			if !ok || icmp4.TypeCode.Type() != test.messageType || icmp4.Id != test.messageID || icmp4.Seq != test.sequence || icmp4.Checksum == 0 || !bytes.HasSuffix(packet4.Data(), test.payload) {
@@ -101,7 +105,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("translation failed: %v", err)
 			}
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
 			translated, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
 			if !ok {
 				t.Fatalf("missing translated ICMPv6 layer: %v", packet.ErrorLayer())
@@ -136,7 +140,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("translation failed: %v", err)
 			}
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
 			translated, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 			if !ok {
 				t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())

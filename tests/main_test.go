@@ -13,7 +13,9 @@ import (
 // RFC 7915 Sections 4.1 and 4.5: translate IPv4/TCP headers and recalculate the TCP pseudo-header checksum.
 func TestTranslateIPv4ToIPv6TCP(t *testing.T) {
 	ipv4Packet := ipv4TCPPacket(t, defaultTTL)
-	result := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv4(ipv4Packet, siit.TranslationOverrides{}) })
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(ipv4Packet, siit.TranslationOverrides{})
+	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 
 	ipv4Layer := ipv4Packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
@@ -39,7 +41,7 @@ func TestTranslateIPv4ToIPv6TCP(t *testing.T) {
 
 // RFC 7915 Sections 5.1, 5.5, and 6: reverse TCP translation uses RFC 6052 address mapping and checksum recalculation.
 func TestTranslateIPv6ToIPv4TCPUsesRFC6052Mapping(t *testing.T) {
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(ipv6TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -74,7 +76,9 @@ func TestTranslateUDPBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	input4 := gopacket.NewPacket(serializeTestPacket(t, ipv4, udp4, gopacket.Payload([]byte("dns"))), layers.LayerTypeIPv4, gopacket.Default)
-	result6 := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv4(input4, siit.TranslationOverrides{}) })
+	result6 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(input4, siit.TranslationOverrides{})
+	})
 	packet6 := gopacket.NewPacket(result6, layers.LayerTypeIPv6, gopacket.Default)
 	udp6, ok := packet6.Layer(layers.LayerTypeUDP).(*layers.UDP)
 	if !ok || udp6.Checksum == 0 || !bytes.Equal(udp6.Payload, []byte("dns")) {
@@ -88,7 +92,9 @@ func TestTranslateUDPBothDirections(t *testing.T) {
 		t.Fatalf("translated IPv6 UDP checksum is invalid: %#x", udp6.Checksum)
 	}
 
-	result4 := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{}) })
+	result4 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{})
+	})
 	packet4 := gopacket.NewPacket(result4, layers.LayerTypeIPv4, gopacket.Default)
 	udp4Result, ok := packet4.Layer(layers.LayerTypeUDP).(*layers.UDP)
 	if !ok || udp4Result.Checksum == 0 || !bytes.Equal(udp4Result.Payload, []byte("dns")) {
@@ -104,7 +110,7 @@ func TestTranslateUDPBothDirections(t *testing.T) {
 func TestTranslateTCPPayloadVariants(t *testing.T) {
 	for _, payload := range [][]byte{nil, {0x01}, {0x01, 0x02}} {
 		input := ipv4TCPPayloadPacket(t, payload, nil)
-		translated6 := mustTranslate(t, func() ([]byte, error) {
+		translated6 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 			return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 		})
 		packet6 := gopacket.NewPacket(translated6, layers.LayerTypeIPv6, gopacket.Default)
@@ -115,7 +121,7 @@ func TestTranslateTCPPayloadVariants(t *testing.T) {
 		if tcp6.Checksum != recalculatedTCPChecksum(t, packet6.Layer(layers.LayerTypeIPv6).(*layers.IPv6), tcp6) {
 			t.Fatalf("TCP checksum changed for %x: got %#x", payload, tcp6.Checksum)
 		}
-		translated4 := mustTranslate(t, func() ([]byte, error) {
+		translated4 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 			return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{})
 		})
 		packet4 := gopacket.NewPacket(translated4, layers.LayerTypeIPv4, gopacket.Default)
@@ -133,7 +139,7 @@ func TestTranslateTCPPayloadVariants(t *testing.T) {
 func TestTranslateTCPOptions(t *testing.T) {
 	options := []layers.TCPOption{{OptionType: 2, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}}
 	input := ipv4TCPPayloadPacket(t, []byte("options"), options)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -158,7 +164,7 @@ func TestTranslateTCPOptionsIPv6ToIPv4(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, tcp, gopacket.Payload([]byte("options"))), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -175,7 +181,7 @@ func TestTranslateTCPOptionsIPv6ToIPv4(t *testing.T) {
 func TestTranslateUDPPayloadVariants(t *testing.T) {
 	for _, payload := range [][]byte{nil, {0x01}, {0x01, 0x02}} {
 		input := ipv4UDPPacket(t, payload)
-		translated6 := mustTranslate(t, func() ([]byte, error) {
+		translated6 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 			return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 		})
 		packet6 := gopacket.NewPacket(translated6, layers.LayerTypeIPv6, gopacket.Default)
@@ -186,7 +192,7 @@ func TestTranslateUDPPayloadVariants(t *testing.T) {
 		if udp6.Checksum != recalculatedUDPChecksum(t, packet6.Layer(layers.LayerTypeIPv6).(*layers.IPv6), udp6) {
 			t.Fatalf("UDP checksum changed for %x: got %#x", payload, udp6.Checksum)
 		}
-		translated4 := mustTranslate(t, func() ([]byte, error) {
+		translated4 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 			return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{})
 		})
 		packet4 := gopacket.NewPacket(translated4, layers.LayerTypeIPv4, gopacket.Default)
@@ -200,59 +206,56 @@ func TestTranslateUDPPayloadVariants(t *testing.T) {
 	}
 }
 
-// Local API contract: explicit source and destination address overrides replace RFC 6052 mapping.
-func TestTranslateUsesAddressOverrides(t *testing.T) {
-	input := ipv4TCPPacket(t, 64)
-	overrides := siit.TranslationOverrides{
-		SourceIP:      net.ParseIP("2001:db8::10"),
-		DestinationIP: net.ParseIP("2001:db8::20"),
-	}
-	result := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv4(input, overrides) })
+// RFC 7757: explicit address mappings are supplied through the EAM table.
+func TestTranslateUsesEAMMappings(t *testing.T) {
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
+		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
+	})
+
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv4(ipv4TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
+	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 	ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-	if !ip.SrcIP.Equal(overrides.SourceIP) || !ip.DstIP.Equal(overrides.DestinationIP) {
-		t.Fatalf("address overrides were ignored: %s -> %s", ip.SrcIP, ip.DstIP)
+	if !ip.SrcIP.Equal(net.ParseIP("2001:db8::10")) || !ip.DstIP.Equal(net.ParseIP("2001:db8::20")) {
+		t.Fatalf("EAM mapping was ignored: %s -> %s", ip.SrcIP, ip.DstIP)
 	}
-}
 
-// Local API contract: address overrides also apply to IPv6-to-IPv4 translation and may be one-sided.
-func TestTranslateUsesReverseAndOneSidedAddressOverrides(t *testing.T) {
-	t.Run("IPv6 to IPv4", func(t *testing.T) {
-		overrides := siit.TranslationOverrides{SourceIP: net.ParseIP("10.0.0.1"), DestinationIP: net.ParseIP("10.0.0.2")}
-		result := mustTranslate(t, func() ([]byte, error) {
-			return testTranslator().TranslateIPv6(ipv6TCPPacket(t, defaultTTL), overrides)
-		})
-		packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
-		ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-		if !ip.SrcIP.Equal(overrides.SourceIP) || !ip.DstIP.Equal(overrides.DestinationIP) {
-			t.Fatalf("reverse address overrides were ignored: %s -> %s", ip.SrcIP, ip.DstIP)
-		}
+	result = mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		input := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("2001:db8::10"), net.ParseIP("2001:db8::20"))
+		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
 	})
+	packet = gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+	ip4 := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if !ip4.SrcIP.Equal(ipv4Source) || !ip4.DstIP.Equal(ipv4Dest) {
+		t.Fatalf("reverse EAM mapping was ignored: %s -> %s", ip4.SrcIP, ip4.DstIP)
+	}
 
-	t.Run("one-sided IPv4 to IPv6", func(t *testing.T) {
-		overrides := siit.TranslationOverrides{SourceIP: net.ParseIP("2001:db8::10")}
-		result := mustTranslate(t, func() ([]byte, error) {
-			return testTranslator().TranslateIPv4(ipv4TCPPacket(t, defaultTTL), overrides)
-		})
-		packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-		ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-		if !ip.SrcIP.Equal(overrides.SourceIP) || !ip.DstIP.Equal(ipv4TranslatedDest) {
-			t.Fatalf("one-sided address override was applied incorrectly: %s -> %s", ip.SrcIP, ip.DstIP)
-		}
+	oneSidedTranslator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
 	})
+	result = mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return oneSidedTranslator.TranslateIPv4(ipv4TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
+	})
+	packet = gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	ip = packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	if !ip.SrcIP.Equal(net.ParseIP("2001:db8::10")) || !ip.DstIP.Equal(ipv4TranslatedDest) {
+		t.Fatalf("one-sided EAM mapping was applied incorrectly: %s -> %s", ip.SrcIP, ip.DstIP)
+	}
 }
 
 // Local API contract: PreventTTLDecrement preserves the input TTL or Hop Limit in either direction.
 func TestTranslateCanPreserveTTLAndHopLimit(t *testing.T) {
-	ipv4Result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv4(ipv4TCPPacket(t, 37), siit.TranslationOverrides{PreventTTLDecrement: true})
+	ipv4Result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(ipv4TCPPacket(t, 37), siit.TranslationOverrides{QuotedPacket: true})
 	})
 	if got := gopacket.NewPacket(ipv4Result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6).HopLimit; got != 37 {
 		t.Fatalf("IPv4 TTL was decremented despite override: %d", got)
 	}
 
-	ipv6Result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv6(ipv6TCPPacket(t, 37), siit.TranslationOverrides{PreventTTLDecrement: true})
+	ipv6Result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv6(ipv6TCPPacket(t, 37), siit.TranslationOverrides{QuotedPacket: true})
 	})
 	if got := gopacket.NewPacket(ipv6Result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4).TTL; got != 37 {
 		t.Fatalf("IPv6 Hop Limit was decremented despite override: %d", got)
@@ -268,7 +271,9 @@ func TestTranslateAtMaximumSupportedIPv4Size(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) { return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}) })
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	})
 	if len(result) != maxIPv6PacketLength {
 		t.Fatalf("maximum-size IPv4 packet translated to %d bytes, want %d", len(result), maxIPv6PacketLength)
 	}
@@ -288,7 +293,7 @@ func TestTranslateRejectsOversizedIPv4Packet(t *testing.T) {
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	if err == nil || result != nil {
-		t.Fatalf("oversized IPv4 packet was not rejected: result length=%d err=%v", len(result), err)
+	if err == nil || result.Packet != nil {
+		t.Fatalf("oversized IPv4 packet was not rejected: result length=%d err=%v", len(result.Packet), err)
 	}
 }

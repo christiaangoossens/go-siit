@@ -50,12 +50,16 @@ const (
 )
 
 func testTranslator() *siit.Translator {
+	return testTranslatorWithEAM(nil)
+}
+
+func testTranslatorWithEAM(eamTable siit.RawEAMTable) *siit.Translator {
 	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
 	if err != nil {
 		panic(err)
 	}
 
-	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress)
+	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
 	if err != nil {
 		panic(err)
 	}
@@ -99,26 +103,26 @@ func ipv4HeaderChecksum(ip *layers.IPv4) uint16 {
 	return ^uint16(sum)
 }
 
-func mustTranslate(t *testing.T, translate func() ([]byte, error)) []byte {
+func mustTranslate(t *testing.T, translate func() (siit.TranslatedPacket, error)) []byte {
 	t.Helper()
 	packet, err := translate()
 	if err != nil {
 		t.Fatalf("translation failed: %v", err)
 	}
-	return packet
+	return packet.Packet
 }
 
-func requireDropped(t *testing.T, result []byte, err error) {
+func requireDropped(t *testing.T, result siit.TranslatedPacket, err error) {
 	t.Helper()
-	if err != nil || result != nil {
-		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result), err)
+	if err != nil || result.Packet != nil {
+		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result.Packet), err)
 	}
 }
 
-func requireRejected(t *testing.T, result []byte, err error) {
+func requireRejected(t *testing.T, result siit.TranslatedPacket, err error) {
 	t.Helper()
-	if err == nil || result != nil {
-		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result), err)
+	if err == nil || result.Packet != nil {
+		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result.Packet), err)
 	}
 }
 

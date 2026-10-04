@@ -19,12 +19,12 @@ func TestTranslateRejectsTruncatedIPHeaders(t *testing.T) {
 		name      string
 		layer     gopacket.LayerType
 		payload   []byte
-		translate func(*siit.Translator, gopacket.Packet) ([]byte, error)
+		translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
 	}{
-		{name: "IPv4", layer: layers.LayerTypeIPv4, payload: []byte{0x45, 0, 0, 20}, translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+		{name: "IPv4", layer: layers.LayerTypeIPv4, payload: []byte{0x45, 0, 0, 20}, translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 			return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 		}},
-		{name: "IPv6", layer: layers.LayerTypeIPv6, payload: []byte{0x60, 0, 0, 0}, translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+		{name: "IPv6", layer: layers.LayerTypeIPv6, payload: []byte{0x60, 0, 0, 0}, translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 			return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 		}},
 	}
@@ -42,7 +42,7 @@ func TestTranslateRejectsTruncatedIPHeaders(t *testing.T) {
 func TestRFC6052MappingGlobalAddress(t *testing.T) {
 	ipv4 := net.ParseIP("8.8.8.8").To4()
 	input := ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -116,7 +116,7 @@ func TestTranslateIPv6RejectsInvalidTransportChecksums(t *testing.T) {
 			binary.BigEndian.PutUint16(packetBytes[test.checksumOffset:test.checksumOffset+2], 0)
 			input := gopacket.NewPacket(packetBytes, layers.LayerTypeIPv6, gopacket.Default)
 			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-			if result != nil {
+			if result.Packet != nil {
 				t.Fatalf("IPv6 packet with an invalid %s checksum was translated: err=%v", test.name, err)
 			}
 		})
@@ -200,7 +200,7 @@ func TestTranslateRejectsInvalidIPv4Checksums(t *testing.T) {
 			binary.BigEndian.PutUint16(packetBytes[test.checksumOffset:test.checksumOffset+2], 0)
 			input := gopacket.NewPacket(packetBytes, layers.LayerTypeIPv4, gopacket.Default)
 			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-			if result != nil {
+			if result.Packet != nil {
 				t.Fatalf("IPv4 packet with an invalid %s checksum was translated: err=%v", test.name, err)
 			}
 		})
@@ -216,10 +216,10 @@ func TestTranslateExpiredTTLBoundaries(t *testing.T) {
 				t.Fatalf("got error %v, want ErrTimeExceeded", err)
 			}
 			translationErr, ok := err.(*siit.TranslationError)
-			if !ok || !bytes.Equal(translationErr.Packet, result) {
+			if !ok || !bytes.Equal(translationErr.Packet, result.Packet) {
 				t.Fatalf("TranslationError.Packet does not match returned packet: %T", err)
 			}
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 			if !ok || ip.NextHeader != layers.IPProtocolICMPv6 {
 				t.Fatalf("missing generated IPv6 ICMP error: %v", packet.ErrorLayer())
@@ -241,10 +241,10 @@ func TestTranslateExpiredTTLBoundaries(t *testing.T) {
 				t.Fatalf("got error %v, want ErrTimeExceeded", err)
 			}
 			translationErr, ok := err.(*siit.TranslationError)
-			if !ok || !bytes.Equal(translationErr.Packet, result) {
+			if !ok || !bytes.Equal(translationErr.Packet, result.Packet) {
 				t.Fatalf("TranslationError.Packet does not match returned packet: %T", err)
 			}
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if !ok || ip.Protocol != layers.IPProtocolICMPv4 || ip.Checksum != ipv4HeaderChecksum(ip) {
 				t.Fatalf("invalid generated IPv4 ICMP error: %v", packet.ErrorLayer())
@@ -275,10 +275,10 @@ func TestTranslateIPv4ZeroChecksumUDP(t *testing.T) {
 	packetBytes[checksumOffset+1] = 0
 	input := gopacket.NewPacket(packetBytes, layers.LayerTypeIPv4, gopacket.Default)
 	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	if err != nil || result == nil {
+	if err != nil || result.Packet == nil {
 		return
 	}
-	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
 	translated, ok := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
 	if !ok || translated.Checksum == 0 {
 		t.Fatalf("forwarded zero-checksum UDP must have an IPv6 checksum: %v", packet.ErrorLayer())

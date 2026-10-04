@@ -26,7 +26,7 @@ func TestTranslateICMPv6ErrorWithUnmappableDestination(t *testing.T) {
 	}
 	inner := ipv6ICMPEchoChecksumPacket(t).Data()
 	input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner)), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 
@@ -47,7 +47,7 @@ func TestTranslateICMPv6ErrorWithUnmappableDestination(t *testing.T) {
 func TestTranslateIPv4ICMPErrorPreservesQuotedEcho(t *testing.T) {
 	inner := ipv4ICMPPacket(t, echoRequest, 0, []byte("icmp")).Data()
 	input := ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 1, inner)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 
@@ -86,8 +86,11 @@ func TestTranslateIPv6ICMPErrorPreservesQuotedEcho(t *testing.T) {
 	}
 	inner := serializeTestPacket(t, innerIP, innerICMP, gopacket.Payload([]byte{0, 0, 0, 0, 'i', 'c', 'm', 'p'}))
 	input := gopacket.NewPacket(serializeTestPacket(t, outer, outerICMP, gopacket.Payload(inner)), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::2/128"},
+	})
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -126,8 +129,11 @@ func TestTranslateIPv6ICMPErrorUsesMappedOuterDestinationInQuote(t *testing.T) {
 	}
 	inner := serializeTestPacket(t, innerIP, innerICMP, gopacket.Payload([]byte{0, 0, 0, 0, 'i', 'c', 'm', 'p'}))
 	input := gopacket.NewPacket(serializeTestPacket(t, outer, outerICMP, gopacket.Payload(inner)), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{DestinationIP: ipv4Source})
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::2/128"},
+	})
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -169,7 +175,7 @@ func TestTranslateICMPv6ErrorMappings(t *testing.T) {
 			}
 			inner := ipv6TCPPacket(t, defaultTTL)
 			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -200,7 +206,7 @@ func TestTranslateICMPv6PacketTooBigMTUBoundaries(t *testing.T) {
 			mtu := make([]byte, 4)
 			binary.BigEndian.PutUint32(mtu, test.mtu)
 			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypePacketTooBig, 0, mtu, ipv6TCPPacket(t, defaultTTL).Data())
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -253,12 +259,12 @@ func TestTranslateIPv4ICMPErrorMatrix(t *testing.T) {
 			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv4, gopacket.Default)
 			if test.icmpType == icmpv4DestUnreachable && test.code == 14 {
 				result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-				if err != nil || result != nil {
-					t.Fatalf("host precedence violation was not silently dropped: result length=%d err=%v", len(result), err)
+				if err != nil || result.Packet != nil {
+					t.Fatalf("host precedence violation was not silently dropped: result length=%d err=%v", len(result.Packet), err)
 				}
 				return
 			}
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -299,7 +305,7 @@ func TestTranslateIPv6ICMPErrorMatrix(t *testing.T) {
 			}
 			inner := ipv6TCPPacket(t, defaultTTL)
 			input := gopacket.NewPacket(serializeTestPacket(t, outer, icmp, gopacket.Payload(inner.Data())), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)

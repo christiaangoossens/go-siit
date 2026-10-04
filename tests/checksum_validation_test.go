@@ -32,8 +32,16 @@ func TestTransportChecksumsFollowNeutralAndNonNeutralMappings(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			result := mustTranslate(t, func() ([]byte, error) {
-				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{SourceIP: test.source, DestinationIP: test.destination})
+			translator := testTranslator()
+			if test.name == "non-neutral address override" {
+				translator = testTranslatorWithEAM(siit.RawEAMTable{
+					{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
+					{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
+				})
+			}
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+				translated, err := translator.TranslateIPv4(input, siit.TranslationOverrides{})
+				return translated, err
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 			ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -48,11 +56,12 @@ func TestTransportChecksumsFollowNeutralAndNonNeutralMappings(t *testing.T) {
 // RFC 7915 Sections 4.5 and 5.5: UDP checksums must cover the translated pseudo-header.
 func TestUDPChecksumFollowsNonNeutralAddressMapping(t *testing.T) {
 	input := ipv4UDPPacket(t, []byte("dns"))
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{
-			SourceIP:      netIP("2001:db8::10"),
-			DestinationIP: netIP("2001:db8::20"),
-		})
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
+		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
+	})
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 	ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -68,11 +77,12 @@ func TestUDPChecksumFollowsNonNeutralAddressMapping(t *testing.T) {
 // RFC 7915 Sections 4.2 and 5.2: ICMP checksums must cover the translated ICMP pseudo-header.
 func TestICMPChecksumFollowsNonNeutralAddressMapping(t *testing.T) {
 	input := ipv4ICMPPacket(t, echoRequest, 0, []byte("icmp"))
-	result := mustTranslate(t, func() ([]byte, error) {
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{
-			SourceIP:      netIP("2001:db8::10"),
-			DestinationIP: netIP("2001:db8::20"),
-		})
+	translator := testTranslatorWithEAM(siit.RawEAMTable{
+		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
+		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
+	})
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return translator.TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 	ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -89,7 +99,7 @@ func TestICMPChecksumFollowsNonNeutralAddressMapping(t *testing.T) {
 func TestTranslateIPv4ICMPErrorPreservesQuotedTTL(t *testing.T) {
 	inner := ipv4TCPPacketWithAddresses(t, 37, ipv4Source, ipv4Dest)
 	input := ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 3, inner.Data())
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	outer := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -117,7 +127,7 @@ func TestTranslateIPv4ICMPErrorPreservesExtension(t *testing.T) {
 	inner = append(inner, make([]byte, 128-len(inner))...)
 	extension := icmpExtension()
 	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeDestinationUnreachable, 3, inner, extension)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	})
 	outer := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -147,7 +157,7 @@ func TestTranslateICMPErrorPreservesOpaqueExtensionBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid ICMP error with an extension failed: %v", err)
 	}
-	outer := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
+	outer := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
 	icmp, ok := outer.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 	if !ok {
 		t.Fatalf("missing translated ICMPv4 layer: %v", outer.ErrorLayer())
@@ -176,7 +186,7 @@ func TestTranslateIPv6ICMPErrorExtensionVariants(t *testing.T) {
 			inner := ipv6TCPPacket(t, defaultTTL).Data()
 			inner = append(inner, make([]byte, 128-len(inner))...)
 			input := ipv6ICMPErrorWithExtension(t, test.messageType, 0, inner, icmpExtension())
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -204,7 +214,7 @@ func TestTranslateIPv4ICMPErrorExtensionVariants(t *testing.T) {
 			inner := ipv4TCPPacket(t, defaultTTL).Data()
 			inner = append(inner, make([]byte, 128-len(inner))...)
 			input := ipv4ICMPErrorWithExtension(t, test.messageType, 0, inner, icmpExtension())
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -291,7 +301,7 @@ func TestTranslateICMPErrorPreservesQuotedHopLimit(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			inner := ipv6TCPPacketWithAddresses(t, 37, test.innerSource, ipv6Dest)
 			input := ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, inner.Data())
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			outer := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -320,7 +330,7 @@ func TestTranslateDropsNestedICMPError(t *testing.T) {
 	inner := ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, ipv6TCPPacket(t, defaultTTL).Data())
 	outer := ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, inner.Data())
 	result, err := testTranslator().TranslateIPv6(outer, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("nested IPv6 ICMP error was translated: err=%v", err)
 	}
 }
@@ -330,7 +340,7 @@ func TestTranslateDropsNestedIPv4ICMPError(t *testing.T) {
 	inner := ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 3, ipv4TCPPacket(t, defaultTTL).Data())
 	outer := ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 3, inner.Data())
 	result, err := testTranslator().TranslateIPv4(outer, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("nested IPv4 ICMP error was translated: err=%v", err)
 	}
 }
@@ -339,20 +349,20 @@ func TestTranslateDropsNestedIPv4ICMPError(t *testing.T) {
 func TestTranslateDropsMalformedQuotedIPPacket(t *testing.T) {
 	tests := []struct {
 		name      string
-		translate func(gopacket.Packet) ([]byte, error)
+		translate func(gopacket.Packet) (siit.TranslatedPacket, error)
 		input     gopacket.Packet
 	}{
 		{
 			name:  "IPv4 outer and quote",
 			input: ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 3, []byte{0x45, 0, 0, 20}),
-			translate: func(input gopacket.Packet) ([]byte, error) {
+			translate: func(input gopacket.Packet) (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 			},
 		},
 		{
 			name:  "IPv6 outer and quote",
 			input: ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, []byte{0x60, 0, 0, 0}),
-			translate: func(input gopacket.Packet) ([]byte, error) {
+			translate: func(input gopacket.Packet) (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			},
 		},
@@ -360,7 +370,7 @@ func TestTranslateDropsMalformedQuotedIPPacket(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := test.translate(test.input)
-			if result != nil {
+			if result.Packet != nil {
 				t.Fatalf("malformed quoted packet was translated: err=%v", err)
 			}
 		})

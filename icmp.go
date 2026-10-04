@@ -310,15 +310,15 @@ func (t *Translator) translateInnerIPv4(icmp *layers.ICMPv4) []byte {
 		return nil
 	}
 
-	translated, err := t.TranslateIPv4(innerPacket, TranslationOverrides{PreventTTLDecrement: true})
+	translated, err := t.TranslateIPv4(innerPacket, TranslationOverrides{QuotedPacket: true})
 	if err != nil {
 		return nil
 	}
 
-	return append(translated, icmp.Payload[innerOffset+innerLength:]...)
+	return append(translated.Packet, icmp.Payload[innerOffset+innerLength:]...)
 }
 
-func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint32) []byte {
+func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint32) TranslatedPacket {
 
 	outer := &layers.IPv6{
 		Version:    6,
@@ -330,15 +330,15 @@ func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint3
 
 	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(4, 0)}
 	if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
-		return nil
+		return TranslatedPacket{}
 	}
 
 	pointerBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(pointerBytes, pointer)
-	return t.serializePacket(outer, icmp, gopacket.Payload(pointerBytes))
+	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(pointerBytes))
 }
 
-func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) []byte {
+func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket {
 	destination := t.mapIPv4ToIPv6(ip.SrcIP)
 	protocol := ip.Protocol
 
@@ -359,19 +359,19 @@ func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) []byte {
 
 	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(3, 0)}
 	if err := icmp.SetNetworkLayerForChecksum(outer); err != nil {
-		return nil
+		return TranslatedPacket{}
 	}
 
-	return t.serializePacket(outer, icmp, gopacket.Payload(innerBytes))
+	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(innerBytes))
 }
 
-func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) []byte {
+func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket {
 	var destination net.IP
 
 	if t.nat64Net.Contains(ip.SrcIP) {
 		destination = ip.SrcIP[12:]
 	} else {
-		return nil
+		return TranslatedPacket{}
 	}
 
 	protocol := ip.NextHeader
@@ -391,10 +391,10 @@ func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) []byte {
 	}
 
 	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(11, 0)}
-	return t.serializePacket(outer, icmp, gopacket.Payload(innerBytes))
+	return t.serializeTranslatedPacket(outer.SrcIP, outer.DstIP, outer, icmp, gopacket.Payload(innerBytes))
 }
 
-func (t *Translator) translateICMPv6(outerDestinationIPv6, dest net.IP, payload []byte) ([]byte, bool) {
+func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 	if len(payload) < 8 {
 		return nil, false
 	}
@@ -436,7 +436,7 @@ func (t *Translator) translateICMPv6(outerDestinationIPv6, dest net.IP, payload 
 			return nil, true
 		}
 
-		return t.generateICMPv6DestUnreachError(code, outerDestinationIPv6, dest, payload), false
+		return t.generateICMPv6DestUnreachError(code, payload), false
 	case 2:
 		// Packet Too Big
 		// Translate to an ICMPv4 Destination
@@ -449,13 +449,13 @@ func (t *Translator) translateICMPv6(outerDestinationIPv6, dest net.IP, payload 
 		if mtu < 20 {
 			return nil, false
 		}
-		return t.generateICMPv4Error(3, 4, outerDestinationIPv6, dest, payload, min(mtu-ipv4HeaderLength, ipv6MinimumMTU)), false
+		return t.generateICMPv4Error(3, 4, payload, min(mtu-ipv4HeaderLength, ipv6MinimumMTU)), false
 	case 3:
 		// Time Exceeded
 		if code > 1 {
 			return nil, false
 		}
-		return t.generateICMPv4Error(11, code, outerDestinationIPv6, dest, payload), false
+		return t.generateICMPv4Error(11, code, payload), false
 	case 4:
 		// Parameter Problem (Type 4)
 		switch code {
@@ -476,12 +476,12 @@ func (t *Translator) translateICMPv6(outerDestinationIPv6, dest net.IP, payload 
 
 			// Set to Type 12,
 			// Code 0, and update the pointer as defined in Figure 6.
-			return t.generateICMPv4Error(12, 0, outerDestinationIPv6, dest, payload, mapped), false
+			return t.generateICMPv4Error(12, 0, payload, mapped), false
 		case 1:
 			// Code 1 (Unrecognized Next Header type encountered)
 			// Translate
 			// this to an ICMPv4 protocol unreachable (Type 3, Code 2).
-			return t.generateICMPv4Error(3, 2, outerDestinationIPv6, dest, payload), false
+			return t.generateICMPv4Error(3, 2, payload), false
 		case 2:
 			// Code 2 (Unrecognized IPv6 option encountered):  Silently drop.
 			return nil, true
@@ -522,7 +522,7 @@ func (t *Translator) translateICMPv6Echo(newType byte, payload []byte) []byte {
 	return t.serializePacket(icmpv4, gopacket.Payload(icmpv6.Payload[echoHeaderLength:]))
 }
 
-func (t *Translator) generateICMPv6DestUnreachError(code byte, outerDestinationIPv6, destinationIPv4 net.IP, payload []byte) []byte {
+func (t *Translator) generateICMPv6DestUnreachError(code byte, payload []byte) []byte {
 	var newCode byte
 
 	switch code {
@@ -559,14 +559,14 @@ func (t *Translator) generateICMPv6DestUnreachError(code byte, outerDestinationI
 		icmpv4.Id = uint16((int(payload[4])*8 - ipv4HeaderLength) / 4)
 	}
 
-	data := t.generateICMPv6ErrorData(outerDestinationIPv6, destinationIPv4, payload)
+	data := t.generateICMPv6ErrorData(payload)
 	if data == nil {
 		return nil
 	}
 	return t.serializePacket(icmpv4, gopacket.Payload(data))
 }
 
-func (t *Translator) generateICMPv4Error(typeNr byte, code byte, outerDestinationIPv6, destinationIPv4 net.IP, payload []byte, rest ...uint32) []byte {
+func (t *Translator) generateICMPv4Error(typeNr byte, code byte, payload []byte, rest ...uint32) []byte {
 	icmpv4 := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(typeNr, code),
 	}
@@ -584,7 +584,7 @@ func (t *Translator) generateICMPv4Error(typeNr byte, code byte, outerDestinatio
 		}
 	}
 
-	data := t.generateICMPv6ErrorData(outerDestinationIPv6, destinationIPv4, payload)
+	data := t.generateICMPv6ErrorData(payload)
 	if data == nil {
 		return nil
 	}
@@ -603,7 +603,7 @@ func (t *Translator) generateICMPv4Error(typeNr byte, code byte, outerDestinatio
 	return t.serializePacket(icmpv4, gopacket.Payload(data))
 }
 
-func (t *Translator) generateICMPv6ErrorData(outerDestinationIPv6, destinationIPv4 net.IP, payload []byte) []byte {
+func (t *Translator) generateICMPv6ErrorData(payload []byte) []byte {
 	if len(payload) < 8 {
 		return nil
 	}
@@ -646,11 +646,7 @@ func (t *Translator) generateICMPv6ErrorData(outerDestinationIPv6, destinationIP
 
 	overrides := TranslationOverrides{
 		// Translate addresses normally, but preserve the inner packet's Hop Limit.
-		PreventTTLDecrement: true,
-	}
-
-	if innerIP.SrcIP.Equal(outerDestinationIPv6) && !t.nat64Net.Contains(innerIP.SrcIP) {
-		overrides.SourceIP = destinationIPv4
+		QuotedPacket: true,
 	}
 
 	translatedInner, err := t.TranslateIPv6(innerPacket, overrides)
@@ -659,5 +655,5 @@ func (t *Translator) generateICMPv6ErrorData(outerDestinationIPv6, destinationIP
 		return nil
 	}
 
-	return append(translatedInner[:min(len(translatedInner), ipv4ICMPErrorPayloadMaximum)], payload[innerOffset+innerLength:]...)
+	return append(translatedInner.Packet[:min(len(translatedInner.Packet), ipv4ICMPErrorPayloadMaximum)], payload[innerOffset+innerLength:]...)
 }

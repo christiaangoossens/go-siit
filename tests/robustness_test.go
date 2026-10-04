@@ -15,7 +15,7 @@ func TestTranslateForwardsUnsupportedProtocols(t *testing.T) {
 	tests := []struct {
 		name        string
 		packet      gopacket.Packet
-		translate   func(*siit.Translator, gopacket.Packet) ([]byte, error)
+		translate   func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
 		outputLayer gopacket.LayerType
 		protocol    layers.IPProtocol
 	}{
@@ -27,7 +27,7 @@ func TestTranslateForwardsUnsupportedProtocols(t *testing.T) {
 				ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolGRE, SrcIP: ipv4Source, DstIP: ipv4Dest}
 				return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 			}(),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
 			},
 		},
@@ -39,14 +39,14 @@ func TestTranslateForwardsUnsupportedProtocols(t *testing.T) {
 				ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 				return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv6, gopacket.Default)
 			}(),
-			translate: func(translator *siit.Translator, packet gopacket.Packet) ([]byte, error) {
+			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
 				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
 			},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return test.translate(testTranslator(), test.packet)
 			})
 			packet := gopacket.NewPacket(result, test.outputLayer, gopacket.Default)

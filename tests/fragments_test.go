@@ -36,7 +36,7 @@ func TestTranslateIPv4FragmentsWithOptions(t *testing.T) {
 				ip.Flags = layers.IPv4MoreFragments
 			}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(fragmentPayload)), layers.LayerTypeIPv4, gopacket.Default)
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
@@ -84,7 +84,7 @@ func TestTranslateIPv6Fragments(t *testing.T) {
 				MoreFragments: test.more, Identification: 0x01020304,
 			}
 			input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, fragmentPayload), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() ([]byte, error) {
+			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -114,7 +114,7 @@ func TestTranslateRejectsFragmentedICMP(t *testing.T) {
 	ipv4Payload := []byte{layers.ICMPv4TypeDestinationUnreachable, 3, 0, 0, 0, 0, 0, 0}
 	ipv4Input := gopacket.NewPacket(serializeTestPacket(t, ipv4, gopacket.Payload(ipv4Payload)), layers.LayerTypeIPv4, gopacket.Default)
 	result, err := testTranslator().TranslateIPv4(ipv4Input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("fragmented ICMPv4 packet was translated: err=%v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestTranslateRejectsFragmentedICMP(t *testing.T) {
 	ipv6Payload := []byte{layers.ICMPv6TypeDestinationUnreachable, 4, 0, 0, 0, 0, 0, 0}
 	ipv6Input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ipv6, fragment, ipv6Payload), layers.LayerTypeIPv6, gopacket.Default)
 	result, err = testTranslator().TranslateIPv6(ipv6Input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("fragmented ICMPv6 packet was translated: err=%v", err)
 	}
 }
@@ -142,7 +142,7 @@ func TestTranslateRejectsFinalNonFirstICMPFragments(t *testing.T) {
 	ipv4Payload := []byte{layers.ICMPv4TypeDestinationUnreachable, 3, 0, 0, 0, 0, 0, 0}
 	ipv4Input := gopacket.NewPacket(serializeTestPacket(t, ipv4, gopacket.Payload(ipv4Payload)), layers.LayerTypeIPv4, gopacket.Default)
 	result, err := testTranslator().TranslateIPv4(ipv4Input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("final non-first ICMPv4 fragment was translated: err=%v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestTranslateRejectsFinalNonFirstICMPFragments(t *testing.T) {
 	ipv6Payload := []byte{layers.ICMPv6TypeDestinationUnreachable, 4, 0, 0, 0, 0, 0, 0}
 	ipv6Input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ipv6, fragment, ipv6Payload), layers.LayerTypeIPv6, gopacket.Default)
 	result, err = testTranslator().TranslateIPv6(ipv6Input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("final non-first ICMPv6 fragment was translated: err=%v", err)
 	}
 }
@@ -170,7 +170,7 @@ func TestTranslateRejectsUnalignedNonFinalFragment(t *testing.T) {
 	fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolTCP, MoreFragments: true, Identification: 0x01020304}
 	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 7)), layers.LayerTypeIPv6, gopacket.Default)
 	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("non-final fragment with an unaligned payload was translated: err=%v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestTranslateRejectsTruncatedIPv6FragmentHeader(t *testing.T) {
 	}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 4))), layers.LayerTypeIPv6, gopacket.Default)
 	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("truncated IPv6 Fragment Header was translated: err=%v", err)
 	}
 }
@@ -198,7 +198,7 @@ func TestTranslateIPv6FragmentMaximumOffset(t *testing.T) {
 		NextHeader: layers.IPProtocolTCP, FragmentOffset: 8191, Identification: 0x1234abcd,
 	}
 	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, []byte("final")), layers.LayerTypeIPv6, gopacket.Default)
-	result := mustTranslate(t, func() ([]byte, error) {
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
 		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
@@ -220,7 +220,7 @@ func TestTranslateDropsFragmentFollowedByExtensionHeader(t *testing.T) {
 	destinationOptions := []byte{byte(layers.IPProtocolTCP), 0, 0, 0, 0, 0, 0, 0}
 	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, append(destinationOptions, tcpFragmentPayload([]byte("extension"))...)), layers.LayerTypeIPv6, gopacket.Default)
 	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if result != nil {
+	if result.Packet != nil {
 		t.Fatalf("fragment followed by an extension header was translated: err=%v", err)
 	}
 }
