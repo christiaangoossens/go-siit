@@ -249,9 +249,9 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 	case layers.IPProtocolICMPv6:
 		payload, dropped = t.translateICMPv4(ipv6, ip.Payload)
 	case layers.IPProtocolTCP:
-		payload = t.translateTCPv4(ipv6, ip.Payload)
+		payload, dropped = t.translateTransport(ipv6, ip.Payload, protocol)
 	case layers.IPProtocolUDP:
-		payload = t.translateUDPv4(ipv6, ip.Payload)
+		payload, dropped = t.translateTransport(ipv6, ip.Payload, protocol)
 	default:
 		payload = ip.Payload
 		// RFC 7915 Section 4.1 requires unsupported transport protocols to be
@@ -278,48 +278,6 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 	}
 
 	return result, nil
-}
-
-func (t *Translator) translateTCPv4(ip *layers.IPv6, payload []byte) []byte {
-	if len(payload) < 20 {
-		return nil
-	}
-
-	// Parse TCP packet
-	tcpLayer := gopacket.NewPacket(payload, layers.LayerTypeTCP, gopacket.Default)
-	tcp, ok := tcpLayer.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if !ok || tcpLayer.ErrorLayer() != nil {
-		return nil
-	}
-
-	err := tcp.SetNetworkLayerForChecksum(ip)
-	if err != nil {
-		log.Printf("Failed to set network layer for TCPv6 checksum: %v", err)
-		return nil
-	}
-
-	return t.serializePacket(tcp, gopacket.Payload(tcp.Payload))
-}
-
-func (t *Translator) translateUDPv4(ip *layers.IPv6, payload []byte) []byte {
-	if len(payload) < 8 {
-		return nil
-	}
-
-	// Parse UDP packet
-	udpLayer := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
-	udp, ok := udpLayer.Layer(layers.LayerTypeUDP).(*layers.UDP)
-	if !ok {
-		return nil
-	}
-
-	err := udp.SetNetworkLayerForChecksum(ip)
-	if err != nil {
-		log.Printf("Failed to set network layer for UDPv6 checksum: %v", err)
-		return nil
-	}
-
-	return t.serializePacket(udp, gopacket.Payload(udp.Payload))
 }
 
 // TranslateIPv6 translates an IPv6 packet to IPv4.
@@ -438,9 +396,9 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 	case layers.IPProtocolICMPv4:
 		payload, dropped = t.translateICMPv6(sanitizedPayload)
 	case layers.IPProtocolTCP:
-		payload = t.translateTCPv6(ipv4, sanitizedPayload)
+		payload, dropped = t.translateTransport(ipv4, sanitizedPayload, protocol)
 	case layers.IPProtocolUDP:
-		payload = t.translateUDPv6(ipv4, sanitizedPayload)
+		payload, dropped = t.translateTransport(ipv4, sanitizedPayload, protocol)
 	case layers.IPProtocolIPv6Fragment:
 		fragmentLayer := packet.Layer(layers.LayerTypeIPv6Fragment)
 		if fragmentLayer == nil {
@@ -508,44 +466,48 @@ func (t *Translator) decrementHopLimit(value uint8) uint8 {
 	return value - 1
 }
 
-func (t *Translator) translateTCPv6(ip *layers.IPv4, payload []byte) []byte {
-	if len(payload) < 20 {
-		return nil
+func (t *Translator) translateTransport(network gopacket.NetworkLayer, payload []byte, protocol layers.IPProtocol) ([]byte, bool) {
+	layerType := transportLayerType(protocol)
+	if len(payload) < transportHeaderLength(protocol) {
+		return nil, false
 	}
 
-	// Parse TCP packet
-	tcpLayer := gopacket.NewPacket(payload, layers.LayerTypeTCP, gopacket.Default)
-	tcp, ok := tcpLayer.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if !ok || tcpLayer.ErrorLayer() != nil {
-		return nil
+	decoded := gopacket.NewPacket(payload, layerType, gopacket.Default)
+	transport := decoded.Layer(layerType)
+	if transport == nil || (protocol == layers.IPProtocolTCP && decoded.ErrorLayer() != nil) {
+		return nil, false
 	}
 
-	err := tcp.SetNetworkLayerForChecksum(ip)
-	if err != nil {
-		log.Printf("Failed to set network layer for TCPv4 checksum: %v", err)
-		return nil
+	if protocol == layers.IPProtocolUDP {
+		udp, ok := transport.(*layers.UDP)
+		if !ok {
+			return nil, false
+		}
+		if network.LayerType() == layers.LayerTypeIPv4 && udp.Checksum == 0 {
+			return nil, true
+		}
 	}
 
-	return t.serializePacket(tcp, gopacket.Payload(tcp.Payload))
+	checksumTransport, ok := transport.(interface {
+		SetNetworkLayerForChecksum(gopacket.NetworkLayer) error
+	})
+	if !ok || checksumTransport.SetNetworkLayerForChecksum(network) != nil {
+		log.Printf("Failed to set network layer for %s checksum", protocol)
+		return nil, false
+	}
+
+	serializable, ok := transport.(gopacket.SerializableLayer)
+	if !ok {
+		return nil, false
+	}
+
+	return t.serializePacket(serializable, gopacket.Payload(transport.LayerPayload())), false
 }
 
-func (t *Translator) translateUDPv6(ip *layers.IPv4, payload []byte) []byte {
-	if len(payload) < 8 {
-		return nil
+func transportHeaderLength(protocol layers.IPProtocol) int {
+	if protocol == layers.IPProtocolUDP {
+		return 8
 	}
 
-	// Parse UDP packet
-	udpLayer := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
-	udp, ok := udpLayer.Layer(layers.LayerTypeUDP).(*layers.UDP)
-	if !ok || udp.Checksum == 0 {
-		return nil
-	}
-
-	err := udp.SetNetworkLayerForChecksum(ip)
-	if err != nil {
-		log.Printf("Failed to set network layer for UDPv4 checksum: %v", err)
-		return nil
-	}
-
-	return t.serializePacket(udp, gopacket.Payload(udp.Payload))
+	return 20
 }

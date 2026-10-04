@@ -83,8 +83,8 @@ func TestTranslateMalformedTransportAndICMPReturnsErrors(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.5 and RFC 8200 Section 8.1: IPv6 UDP packets must not carry a zero checksum.
-func TestTranslateIPv6ZeroChecksumUDPReturnsError(t *testing.T) {
+// RFC 7915 Section 5.5 and RFC 8200 Section 8.1: IPv6 UDP packets with a zero checksum are silently dropped.
+func TestTranslateIPv6ZeroChecksumUDPDropsPacket(t *testing.T) {
 	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolUDP, HopLimit: 64, SrcIP: ipv6Source, DstIP: ipv6Dest}
 	udp := &layers.UDP{SrcPort: 40000, DstPort: 9999}
 	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
@@ -95,8 +95,9 @@ func TestTranslateIPv6ZeroChecksumUDPReturnsError(t *testing.T) {
 	packetBytes[checksumOffset] = 0
 	packetBytes[checksumOffset+1] = 0
 	input := gopacket.NewPacket(packetBytes, layers.LayerTypeIPv6, gopacket.Default)
-	if _, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{}); err == nil {
-		t.Fatal("IPv6 UDP with a zero checksum was accepted")
+	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	if err != nil || result.Packet != nil {
+		t.Fatalf("IPv6 UDP with a zero checksum was not silently dropped: result length=%d err=%v", len(result.Packet), err)
 	}
 }
 
