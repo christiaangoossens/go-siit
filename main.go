@@ -13,9 +13,14 @@ import (
 
 // Translator converts packets between IPv4 and IPv6 according to SIIT.
 type Translator struct {
-	nat64Net          *net.IPNet
+	// Network prefix used for NAT64 translation, as defined in RFC 6052.
+	nat64Net *net.IPNet
+	// IPv4 address used for routing and ICMP error generation
 	ipv4RouterAddress net.IP
-	eamLookup         *eamLookup
+	// EAM table (RFC 7757)
+	eamLookup *eamLookup
+	// MTU is the IPv6 path MTU used to determine the maximum IPv4 packet size.
+	MTU uint32
 }
 
 type TranslationOverrides struct {
@@ -36,6 +41,7 @@ var (
 	ErrUnsupportedSrcIP    = errors.New("Unsupported source IP address")
 	ErrUnsupportedDestIP   = errors.New("Unsupported destination IP address")
 	ErrPacketOversized     = errors.New("Packet is too large to be translated without possible fragmentation")
+	ErrInvalidMTU          = errors.New("MTU is below the IPv6 minimum")
 )
 
 type TranslationError struct {
@@ -53,9 +59,17 @@ func (e *TranslationError) Unwrap() error {
 	return e.Err
 }
 
-// NewTranslator creates a SIIT translator with the addresses used for routing
-// and ICMP error generation.
+// NewTranslator creates a SIIT translator with the default IPv6 minimum MTU.
 func NewTranslator(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTable RawEAMTable) (*Translator, error) {
+	return NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, eamTable, ipv6MinimumMTU)
+}
+
+// NewTranslatorWithMTU creates a SIIT translator with the supplied IPv6 path MTU.
+func NewTranslatorWithMTU(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTable RawEAMTable, mtu uint32) (*Translator, error) {
+	if mtu < ipv6MinimumMTU {
+		return nil, ErrInvalidMTU
+	}
+
 	if err := validateRFC6052Prefix(nat64Net); err != nil {
 		return nil, err
 	}
@@ -74,7 +88,16 @@ func NewTranslator(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTable RawEA
 		nat64Net:          nat64Net,
 		ipv4RouterAddress: ipv4RouterAddress,
 		eamLookup:         eamLookup,
+		MTU:               mtu,
 	}, nil
+}
+
+func (t *Translator) maxIPv4PacketLength(fragmented bool) uint32 {
+	if fragmented {
+		return t.MTU - ipv6HeaderLength - ipv6FragmentHeaderLength + ipv4HeaderLength
+	}
+
+	return t.MTU - ipv6HeaderLength + ipv4HeaderLength
 }
 
 func (t *Translator) serializePacket(packetLayers ...gopacket.SerializableLayer) []byte {
@@ -120,30 +143,31 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 		}
 	}
 
-	// PreventTTLDecrement is already used by ICMP quote translation to mark
-	// an embedded packet. Embedded packets have already passed ingress checks.
-	quotedPacket := overrides.QuotedPacket
-
 	// RFC 791 Section 3.1 defines a 20-byte minimum IPv4 header and requires
 	// Total Length to include that header; reject packets that cannot be parsed.
 	if ip == nil || ip.Version != 4 || ip.IHL < 5 || len(ip.Contents) < int(ip.IHL)*4 || ip.Length < uint16(ip.IHL)*4 {
 		return translated, fmt.Errorf("%w: invalid IPv4 header", ErrInvalidPacket)
 	}
+
 	for _, option := range ip.Options {
 		// RFC 7915 Section 4.1 says an unexpired IPv4 source route MUST cause
 		// the packet to be discarded because IPv4 options are not translated.
 		if option.OptionType == 131 || option.OptionType == 137 {
 			return translated, nil
 		}
+
+		// Other options are ignored (section 1.2).
 	}
 
-	if !quotedPacket && !validIPv4HeaderChecksum(ip) {
+	if !overrides.QuotedPacket && !validIPv4HeaderChecksum(ip) {
 		return translated, fmt.Errorf("%w: invalid IPv4 header checksum", ErrInvalidPacket)
 	}
 
-	// Check packet size
-	if ip.Length > 1260 {
-		return translated, fmt.Errorf("%w: IPv4 packet length %d exceeds 1260 bytes", ErrPacketOversized, ip.Length)
+	fragmented := ip.Flags&layers.IPv4MoreFragments != 0 || ip.FragOffset != 0
+	maxIPv4PacketLength := t.maxIPv4PacketLength(fragmented)
+
+	if uint32(ip.Length) > maxIPv4PacketLength {
+		return translated, fmt.Errorf("%w: IPv4 packet length %d exceeds %d bytes", ErrPacketOversized, ip.Length, maxIPv4PacketLength)
 	}
 
 	// Check if TTL would be 0, if so generate an ICMP Time Exceeded message back to the source of the original packet
@@ -164,14 +188,13 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 		protocol = layers.IPProtocolICMPv6
 	}
 
-	fragmented := ip.Flags&layers.IPv4MoreFragments != 0 || ip.FragOffset != 0
 	// RFC 7915 Section 1.2 states that fragmented ICMP/ICMPv6 packets are not
 	// translated; RFC 792 defines an 8-byte minimum ICMPv4 header.
 	if !fragmented && ip.Protocol == layers.IPProtocolICMPv4 && len(ip.Payload) < 8 {
 		return translated, ErrInvalidICMP
 	}
 
-	if !fragmented && !quotedPacket && ip.Protocol != layers.IPProtocolUDP && !validTransportChecksum(ip, ip.Protocol, ip.Payload) {
+	if !fragmented && !overrides.QuotedPacket && ip.Protocol != layers.IPProtocolUDP && !validTransportChecksum(ip, ip.Protocol, ip.Payload) {
 		return translated, fmt.Errorf("%w: invalid IPv4 transport checksum", ErrInvalidPacket)
 	}
 
@@ -330,7 +353,7 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet.Packet}
 	}
 
-	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915)
+	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 1.2)
 	protocol := ip.NextHeader
 	sanitizedPayload := ip.Payload
 	for _, layer := range packet.Layers() {

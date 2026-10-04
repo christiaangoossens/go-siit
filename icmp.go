@@ -13,6 +13,7 @@ const (
 	icmpErrorRestHeaderLength   = 4
 	ipv4HeaderLength            = 20
 	ipv6HeaderLength            = 40
+	ipv6FragmentHeaderLength    = 8
 	ipv4MinimumMTU              = 576
 	ipv6MinimumMTU              = 1280
 	ipv4ICMPErrorPayloadMaximum = ipv4MinimumMTU - ipv4HeaderLength - icmpErrorRestHeaderLength

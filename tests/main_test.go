@@ -262,7 +262,7 @@ func TestTranslateCanPreserveTTLAndHopLimit(t *testing.T) {
 	}
 }
 
-// Local packet-size contract: a 1260-byte IPv4 packet becomes a 1280-byte IPv6 packet without fragmentation.
+// Local packet-size contract: a 1260-byte unfragmented IPv4 packet fits the default 1280-byte IPv6 MTU.
 func TestTranslateAtMaximumSupportedIPv4Size(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xab}, maxIPv4PacketLength-ipv4HeaderLength-udpHeaderLength)
 	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP, SrcIP: ipv4Source, DstIP: ipv4Dest}
@@ -283,7 +283,23 @@ func TestTranslateAtMaximumSupportedIPv4Size(t *testing.T) {
 	}
 }
 
-// Local packet-size contract: IPv4 packets larger than 1260 bytes are rejected.
+// Local packet-size contract: a fragmented IPv4 packet reserves eight more bytes for the IPv6 Fragment header.
+func TestTranslateAtMaximumSupportedFragmentedIPv4Size(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xab}, maxFragmentedIPv4Length-ipv4HeaderLength)
+	ip := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP,
+		Flags: layers.IPv4MoreFragments, SrcIP: ipv4Source, DstIP: ipv4Dest,
+	}
+	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	})
+	if len(result) != maxIPv6PacketLength {
+		t.Fatalf("maximum-size fragmented IPv4 packet translated to %d bytes, want %d", len(result), maxIPv6PacketLength)
+	}
+}
+
+// Local packet-size contract: unfragmented IPv4 packets larger than 1260 bytes are rejected by the default MTU.
 func TestTranslateRejectsOversizedIPv4Packet(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xab}, maxIPv4PacketLength+1-ipv4HeaderLength-udpHeaderLength)
 	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP, SrcIP: ipv4Source, DstIP: ipv4Dest}
@@ -295,5 +311,50 @@ func TestTranslateRejectsOversizedIPv4Packet(t *testing.T) {
 	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
 	if err == nil || result.Packet != nil {
 		t.Fatalf("oversized IPv4 packet was not rejected: result length=%d err=%v", len(result.Packet), err)
+	}
+}
+
+// Local packet-size contract: a 1500-byte IPv6 MTU permits unfragmented IPv4 packets up to 1480 bytes.
+func TestTranslateUsesConfiguredMTU(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		packetSize int
+		wantError  bool
+	}{
+		{name: "maximum packet", packetSize: 1480},
+		{name: "oversized packet", packetSize: 1481, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0xab}, test.packetSize-ipv4HeaderLength-udpHeaderLength)
+			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP, SrcIP: ipv4Source, DstIP: ipv4Dest}
+			udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}
+			if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+				t.Fatal(err)
+			}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+			translator := testTranslator()
+			translator.MTU = 1500
+			result, err := translator.TranslateIPv4(input, siit.TranslationOverrides{})
+			if test.wantError {
+				if err == nil || result.Packet != nil {
+					t.Fatalf("oversized IPv4 packet was not rejected: result length=%d err=%v", len(result.Packet), err)
+				}
+				return
+			}
+			if err != nil || result.Packet == nil {
+				t.Fatalf("maximum IPv4 packet was rejected: result length=%d err=%v", len(result.Packet), err)
+			}
+		})
+	}
+}
+
+func TestNewTranslatorWithMTURejectsValuesBelowIPv6Minimum(t *testing.T) {
+	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, 1279); err == nil {
+		t.Fatal("translator accepted an MTU below the IPv6 minimum")
 	}
 }

@@ -31,6 +31,7 @@ const (
 	icmpChecksumOffset      = 2
 	maxIPv4PacketLength     = 1260
 	maxIPv6PacketLength     = 1280
+	maxFragmentedIPv4Length = 1252
 	defaultTTL              = 64
 	testSourcePort          = 40000
 	testTCPDestinationPort  = 443
@@ -46,7 +47,6 @@ const (
 	icmpv6TimeExceeded      = 3
 	icmpv4DestUnreachable   = 3
 	icmpv6DestUnreachable   = 1
-	icmpPortUnreachableCode = 3
 )
 
 func testTranslator() *siit.Translator {
