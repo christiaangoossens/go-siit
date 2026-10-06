@@ -22,6 +22,10 @@ func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint3
 
 	// RFC 4443 Section 3.4: as much of the invoking packet as fits is quoted.
 	invoking := slices.Concat(ip.Contents, ip.Payload)
+	if ip.HopByHop != nil {
+		// gopacket decodes a leading Hop-by-Hop header out of the payload, so put it back.
+		invoking = slices.Concat(ip.Contents, ip.HopByHop.Contents, ip.Payload)
+	}
 	message := newICMPv6(outer, 4, 0, pointer, invoking[:min(len(invoking), ipv6ICMPErrorPayloadMaximum)])
 	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, gopacket.Payload(message))
 }

@@ -52,15 +52,16 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		return translated, fmt.Errorf("%w: invalid IPv6 header", ErrInvalidPacket)
 	}
 
-	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 1.2)
-	// The IPv6
-	//  headers HOPOPT (0), IPv6-Route (43), and IPv6-Opts (60) are
-	//  skipped over during processing as they have no meaning in IPv4.
 	protocol, payload, offset := ip.NextHeader, ip.Payload, ipv6HeaderLength
 	if ip.HopByHop != nil {
 		// gopacket already decoded a leading Hop-by-Hop header as part of the IPv6 layer.
 		protocol, offset = ip.HopByHop.NextHeader, offset+ip.HopByHop.ActualLength
 	}
+
+	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 1.2)
+	// The IPv6
+	//  headers HOPOPT (0), IPv6-Route (43), and IPv6-Opts (60) are
+	//  skipped over during processing as they have no meaning in IPv4.
 	segmentsLeftOffset := 0
 	for protocol == layers.IPProtocolIPv6HopByHop || protocol == layers.IPProtocolIPv6Routing || protocol == layers.IPProtocolIPv6Destination {
 		// RFC 8200 Section 4.3: Next Header, then Hdr Ext Len in 8-octet units not including the first 8 octets.
@@ -79,6 +80,12 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 
 	// A quoted packet is not routed, so its Routing header does not matter.
 	if segmentsLeftOffset != 0 && !quoted {
+		// The Parameter Problem below is itself an ICMPv6 error, and RFC 4443 Section 2.4 (e.1)
+		// forbids sending one in response to an ICMPv6 error message (types 0-127),
+		// so such a packet is dropped without a reply.
+		if protocol == layers.IPProtocolICMPv6 && len(payload) > 0 && payload[0] < 128 {
+			return translated, fmt.Errorf("%w: IPv6 routing header has segments left", ErrInvalidPacket)
+		}
 		// RFC 7915 Section 5.1: Parameter Problem pointing at Segments Left.
 		result := t.generateIPv6ParameterProblem(ip, uint32(segmentsLeftOffset))
 		return result, &TranslationError{Err: fmt.Errorf("%w: IPv6 routing header has segments left", ErrInvalidPacket), Packet: result.Packet}
@@ -99,11 +106,11 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		return translated, fmt.Errorf("%w: IPv6 source %s is not mappable", ErrUnsupportedSrcIP, ip.SrcIP)
 	}
 
-	// Guard against invalid destinations: only the source may fall back to the router address.
 	if t.isForbiddenIPv6(ip.DstIP) {
 		return translated, fmt.Errorf("%w: IPv6 destination %s embeds a non-global IPv4 address", ErrUnsupportedDestIP, ip.DstIP)
 	}
 
+	// Only the source may fall back to the router address, so the destination must always be mappable.
 	if !t.hasIPv6ToIPv4Mapping(ip.DstIP) {
 		return translated, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrInvalidPacket, ip.DstIP)
 	}

@@ -74,6 +74,8 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 			return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet.Packet}
 		}
 
+		icmpError := ip.Protocol == layers.IPProtocolICMPv4 && ip.FragOffset == 0 && len(ip.Payload) > 0 && isICMPv4ErrorType(ip.Payload[0])
+
 		// If any IPv4 options are present in the IPv4 packet, they MUST be
 		// ignored and the packet translated normally; there is no attempt to
 		// translate the options.  However, if an unexpired source route option
@@ -85,12 +87,16 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 			// the packet to be discarded because IPv4 options are not translated.
 			// RFC 791 Section 3.1: the route is used up once its pointer lies beyond the option.
 			if (option.OptionType == 131 || option.OptionType == 137) && len(option.OptionData) > 0 && option.OptionData[0] <= option.OptionLength {
+				// RFC 1812 Section 4.3.2.7: no ICMP error in reply to an ICMP error, so such a packet is only discarded.
+				if icmpError {
+					return translated, fmt.Errorf("%w: unexpired source route in ICMPv4 error", ErrInvalidPacket)
+				}
+
 				return t.generateIPv4SourceRouteFailed(ip), nil
 			}
 		}
 
-		// Check the transport signature (skip if fragment or quoted)
-		// May also reject if transport headers are malformed
+		// Check the transport checksum (skip if fragment)
 		// RFC 768 Section 3: IPv4 UDP may omit its checksum.
 		pseudoHeader := ipv4PseudoHeader(ip.SrcIP, ip.DstIP, ip.Protocol, len(ip.Payload))
 		if !fragmented && !isZeroUDPChecksum(ip.Payload, ip.Protocol) && !validTransportChecksum(pseudoHeader, ip.Protocol, ip.Payload) {
@@ -159,9 +165,6 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 		if fragmented {
 			// RFC 7915 Section 4.1 requires an IPv6 Fragment Header for an already
 			// fragmented IPv4 packet and copies its offset, M flag, and identifier.
-			// The low-order 16 bits copied from the
-			// Identification field in the IPv4 header.  The high-order 16
-			// bits set to zero.
 			ipv6.NextHeader = layers.IPProtocolIPv6Fragment
 			ipv6.Length += ipv6FragmentHeaderLength
 			fragmentHeader := make([]byte, ipv6FragmentHeaderLength)
@@ -172,6 +175,9 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 				fragmentHeader[3] |= 1
 			}
 
+			// The low-order 16 bits copied from the
+			// Identification field in the IPv4 header.  The high-order 16
+			// bits set to zero.
 			binary.BigEndian.PutUint32(fragmentHeader[4:8], uint32(ip.Id))
 			payload = append(fragmentHeader, payload...)
 		}

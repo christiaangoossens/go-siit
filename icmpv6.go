@@ -73,9 +73,7 @@ func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 		// Packet Too Big
 		// Translate to an ICMPv4 Destination
 		//  Unreachable (Type 3) with Code 4
-		if code != 0 {
-			return nil, false
-		}
+		// RFC 4443 Section 3.2: the Code is ignored by the receiver.
 		// RFC 4443 stores Packet Too Big's four-byte MTU at the start of its body.
 		// RFC 7915 Section 5.2: the MTU loses the difference between the IPv6 and IPv4 header, limited by our own IPv6 MTU.
 		mtu := min(max(binary.BigEndian.Uint32(icmpv6Payload), ipv6MinimumMTU), t.MTU) - (ipv6HeaderLength - ipv4HeaderLength)

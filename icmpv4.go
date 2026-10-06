@@ -171,6 +171,16 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 	return newICMPv6(ip, newType, 0, uint32(identifier)<<16|uint32(sequence), icmpv4Payload), false
 }
 
+// isICMPv4ErrorType reports whether an ICMPv4 type is an error message (RFC 792):
+// Destination Unreachable, Source Quench, Redirect, Time Exceeded and Parameter Problem.
+func isICMPv4ErrorType(icmpType byte) bool {
+	switch icmpType {
+	case 3, 4, 5, 11, 12:
+		return true
+	}
+	return false
+}
+
 // translateICMPv4Error builds the ICMPv6 error around the translated quote, RFC 4884 extensions go to Types 1 and 3.
 func (t *Translator) translateICMPv4Error(ip *layers.IPv6, payload []byte, icmpType, code byte, rest uint32) ([]byte, bool) {
 	data, extension := payload[icmpErrorHeaderLength:], []byte(nil)
