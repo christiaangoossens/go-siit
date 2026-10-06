@@ -359,7 +359,8 @@ func TestTranslateExpiredTTLBoundaries(t *testing.T) {
 			if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(3, 0) || icmp.Checksum != recalculatedICMPv6Checksum(t, ip, icmp) {
 				t.Fatalf("invalid generated IPv6 Time Exceeded: %v", packet.ErrorLayer())
 			}
-			quoted := gopacket.NewPacket(icmp.Payload, layers.LayerTypeIPv6, gopacket.Default)
+			// RFC 4443 Section 3.3: a four-byte unused word precedes the quoted packet.
+			quoted := icmpv6ErrorQuote(t, packet)
 			quotedIP, ok := quoted.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 			if !ok || quotedIP.HopLimit != ttl {
 				t.Fatalf("generated quote has Hop Limit %d, want %d", quotedIP.HopLimit, ttl)
@@ -489,11 +490,12 @@ func TestTranslateIPv4UnexpiredLooseSourceRouteFails(t *testing.T) {
 // Identification generator at the translator", so successive packets do not all share one value.
 func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 	ids := map[uint16]bool{}
+	translator := testTranslator()
 	for range 4 {
 		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 8))), layers.LayerTypeIPv6, gopacket.Default)
 		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			return translator.TranslateIPv6(input, siit.TranslationOverrides{})
 		})
 		ids[binary.BigEndian.Uint16(result[4:6])] = true
 	}

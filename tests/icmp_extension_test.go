@@ -79,14 +79,13 @@ func TestTranslateIPv6ICMPErrorExtensionVariants(t *testing.T) {
 	}
 }
 
-// RFC 4884 Sections 3, 4, and 7: extensions are valid on IPv4 Time Exceeded and Parameter Problem messages.
+// RFC 4884 Sections 3, 4, and 7: extensions are valid on IPv4 Time Exceeded messages.
 func TestTranslateIPv4ICMPErrorExtensionVariants(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		messageType uint8
 	}{
 		{name: "time exceeded", messageType: layers.ICMPv4TypeTimeExceeded},
-		{name: "parameter problem", messageType: layers.ICMPv4TypeParameterProblem},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			inner := ipv4TCPPacket(t, defaultTTL).Data()
@@ -105,6 +104,31 @@ func TestTranslateIPv4ICMPErrorExtensionVariants(t *testing.T) {
 				t.Fatalf("translated ICMPv4 %s extension checksum is invalid: %#x", test.name, icmp.Checksum)
 			}
 		})
+	}
+}
+
+// RFC 4884 Section 4 defines extensions for ICMPv4 Parameter Problem (octet 4 is the pointer, octet 5 the length),
+// but ICMPv6 Parameter Problem has no room for a length: its pointer occupies the whole four-byte word. The
+// translated message therefore carries the translated quote only, without the extension structure.
+func TestTranslateIPv4ParameterProblemExtensionIsNotCarriedToICMPv6(t *testing.T) {
+	inner := ipv4TCPPacket(t, defaultTTL).Data()
+	inner = append(inner, make([]byte, 128-len(inner))...)
+	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeParameterProblem, 0, inner, icmpExtension())
+	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
+		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	})
+	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
+	icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
+		t.Fatalf("missing translated ICMPv6 Parameter Problem: %v", packet.ErrorLayer())
+	}
+	if got := icmpPointerValue(t, icmp.Payload); got != 0 {
+		t.Fatalf("pointer is %d, want 0: the RFC 4884 length leaked into the pointer", got)
+	}
+	quote := icmpv6ErrorQuote(t, packet)
+	quotedIP, ok := quote.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	if !ok || len(icmp.Payload) != icmpErrorRestHeaderSize+ipv6HeaderLength+int(quotedIP.Length) {
+		t.Fatalf("Parameter Problem carries more than the translated quote (%d octets)", len(icmp.Payload))
 	}
 }
 

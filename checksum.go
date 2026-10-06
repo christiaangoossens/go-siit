@@ -1,147 +1,97 @@
 package siit
 
 import (
-	"github.com/google/gopacket"
+	"encoding/binary"
+	"net"
+
 	"github.com/google/gopacket/layers"
 )
 
-func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
-	original := ip.Checksum
-	copy := *ip
-	buffer := gopacket.NewSerializeBuffer()
+/**
+ * Internet checksum (RFC 1071, RFC 1624)
+ */
 
-	if err := copy.SerializeTo(buffer, gopacket.SerializeOptions{ComputeChecksums: true}); err != nil {
-		return false
-	}
-
-	return copy.Checksum == original
+// Minimum length and checksum offset of every transport protocol with a checksum.
+var checksummedProtocols = map[layers.IPProtocol]struct{ headerLength, checksumOffset int }{
+	layers.IPProtocolTCP:    {20, 16},
+	layers.IPProtocolUDP:    {8, 6},
+	layers.IPProtocolICMPv4: {8, 2},
+	layers.IPProtocolICMPv6: {8, 2},
 }
 
-func validTransportChecksum(network gopacket.NetworkLayer, protocol layers.IPProtocol, payload []byte) bool {
-	layerType := transportLayerType(protocol)
-	decoded := gopacket.NewPacket(payload, layerType, gopacket.Default)
-	buffer := gopacket.NewSerializeBuffer()
-
-	switch protocol {
-	case layers.IPProtocolTCP:
-		if len(payload) < transportHeaderLength(protocol) {
-			return false
+// Only the last part may have an odd length.
+func internetChecksum(parts ...[]byte) uint16 {
+	var sum uint32
+	for _, part := range parts {
+		for index := 0; index+1 < len(part); index += 2 {
+			sum += uint32(binary.BigEndian.Uint16(part[index:]))
 		}
-
-		transport, ok := decoded.Layer(layers.LayerTypeTCP).(*layers.TCP)
-		if !ok || transport.SetNetworkLayerForChecksum(network) != nil {
-			return false
+		if len(part)%2 == 1 {
+			sum += uint32(part[len(part)-1]) << 8
 		}
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + sum>>16
+	}
 
-		original := transport.Checksum
-		if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true}, transport, gopacket.Payload(transport.Payload)); err != nil {
-			return false
-		}
+	return ^uint16(sum)
+}
 
-		return transport.Checksum == original
-	case layers.IPProtocolUDP:
-		if len(payload) < transportHeaderLength(protocol) {
-			return false
-		}
+// RFC 1624 Equation 3: both slices must have an even length.
+func adjustChecksum(checksum uint16, removed, added []byte) uint16 {
+	sum := uint32(^checksum)
+	for index := 0; index+1 < len(removed); index += 2 {
+		sum += uint32(^binary.BigEndian.Uint16(removed[index:]))
+	}
+	for index := 0; index+1 < len(added); index += 2 {
+		sum += uint32(binary.BigEndian.Uint16(added[index:]))
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + sum>>16
+	}
 
-		transport, ok := decoded.Layer(layers.LayerTypeUDP).(*layers.UDP)
-		if !ok {
-			return false
-		}
+	return ^uint16(sum)
+}
 
-		// RFC 768 Section 3: IPv4 UDP may omit its checksum.
-		if network.LayerType() == layers.LayerTypeIPv4 && transport.Checksum == 0 {
-			return true
-		} else if transport.Checksum == 0 {
-			return false
-		}
+// The ICMPv4 checksum has no pseudo-header (RFC 792).
+func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+	if protocol == layers.IPProtocolICMPv4 {
+		return nil
+	}
 
-		if transport.SetNetworkLayerForChecksum(network) != nil {
-			return false
-		}
+	header := make([]byte, 12)
+	copy(header[0:4], source.To4())
+	copy(header[4:8], destination.To4())
+	header[9] = byte(protocol)
+	binary.BigEndian.PutUint16(header[10:12], uint16(length))
+	return header
+}
 
-		original := transport.Checksum
-		if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true}, transport, gopacket.Payload(transport.Payload)); err != nil {
-			return false
-		}
+// RFC 8200 Section 8.1
+func ipv6PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+	header := make([]byte, 40)
+	copy(header[0:16], source.To16())
+	copy(header[16:32], destination.To16())
+	binary.BigEndian.PutUint32(header[32:36], uint32(length))
+	header[39] = byte(protocol)
+	return header
+}
 
-		return transport.Checksum == original
-	case layers.IPProtocolICMPv4:
-		if len(payload) < 8 {
-			return false
-		}
+func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
+	return internetChecksum(ip.Contents) == 0
+}
 
-		transport, ok := decoded.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-		if !ok {
-			return false
-		}
-
-		original := transport.Checksum
-		if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true}, transport, gopacket.Payload(transport.Payload)); err != nil {
-			return false
-		}
-
-		return transport.Checksum == original
-	case layers.IPProtocolICMPv6:
-		if len(payload) < 8 {
-			return false
-		}
-
-		transport, ok := decoded.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-		if !ok || transport.SetNetworkLayerForChecksum(network) != nil {
-			return false
-		}
-
-		original := transport.Checksum
-		if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true}, transport, gopacket.Payload(transport.Payload)); err != nil {
-			return false
-		}
-
-		return transport.Checksum == original
-	default:
+// Protocols without a checksum are always valid. A UDP checksum of zero is handled by the caller.
+func validTransportChecksum(pseudoHeader []byte, protocol layers.IPProtocol, payload []byte) bool {
+	transport, ok := checksummedProtocols[protocol]
+	if !ok {
 		return true
 	}
+
+	return len(payload) >= transport.headerLength && internetChecksum(pseudoHeader, payload) == 0
 }
 
 func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
-	if protocol != layers.IPProtocolUDP || len(payload) < 8 {
-		return false
-	}
-
-	decoded := gopacket.NewPacket(payload, layers.LayerTypeUDP, gopacket.Default)
-	udp, ok := decoded.Layer(layers.LayerTypeUDP).(*layers.UDP)
-	return ok && udp.Checksum == 0
-}
-
-func transportLayerType(protocol layers.IPProtocol) gopacket.LayerType {
-	switch protocol {
-	case layers.IPProtocolUDP:
-		return layers.LayerTypeUDP
-	case layers.IPProtocolICMPv4:
-		return layers.LayerTypeICMPv4
-	case layers.IPProtocolICMPv6:
-		return layers.LayerTypeICMPv6
-	default:
-		return layers.LayerTypeTCP
-	}
-}
-
-func shouldValidateICMPv6(payload []byte) bool {
-	if len(payload) == 0 {
-		return true
-	}
-
-	switch payload[0] {
-	case layers.ICMPv6TypeMLDv1MulticastListenerQueryMessage,
-		layers.ICMPv6TypeMLDv1MulticastListenerReportMessage,
-		layers.ICMPv6TypeMLDv1MulticastListenerDoneMessage,
-		layers.ICMPv6TypeRouterSolicitation,
-		layers.ICMPv6TypeRouterAdvertisement,
-		layers.ICMPv6TypeNeighborSolicitation,
-		layers.ICMPv6TypeNeighborAdvertisement,
-		layers.ICMPv6TypeRedirect:
-		return false
-	default:
-		return true
-	}
+	offset := checksummedProtocols[layers.IPProtocolUDP].checksumOffset
+	return protocol == layers.IPProtocolUDP && len(payload) >= offset+2 && binary.BigEndian.Uint16(payload[offset:]) == 0
 }

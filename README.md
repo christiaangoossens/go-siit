@@ -58,4 +58,4 @@ This library currently does not support:
 
 ## AI-declaration
 
-Test suite is AI-assisted programming with manual review. The main library itself is manually written (with AI review/suggestions only).
+Test suite is AI programming with manual review. The main library itself is manually written (with AI review/assistance only).
