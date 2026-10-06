@@ -42,6 +42,13 @@ func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides Translation
 		return translated, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDestIP, ip.DstIP)
 	}
 
+	// IPv6 extension headers have no IPv4 equivalent. Forwarding their protocol numbers would make the receiver
+	// parse the payload as an extension header.
+	switch ip.Protocol {
+	case layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Fragment, layers.IPProtocolIPv6Destination:
+		return translated, fmt.Errorf("%w: IPv4 protocol %d is an IPv6 extension header", ErrUnsupportedProtocol, ip.Protocol)
+	}
+
 	translated.SrcIP = t.mapIPv4ToIPv6(ip.SrcIP)
 	translated.DstIP = t.mapIPv4ToIPv6(ip.DstIP)
 

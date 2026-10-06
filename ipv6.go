@@ -115,6 +115,14 @@ func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides Translation
 		return translated, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrInvalidPacket, ip.DstIP)
 	}
 
+	if t.isIllegalIPv4Embedded(ip.SrcIP) {
+		return translated, fmt.Errorf("%w: IPv6 source %s embeds an illegal IPv4 address", ErrUnsupportedSrcIP, ip.SrcIP)
+	}
+
+	if t.isIllegalIPv4Embedded(ip.DstIP) {
+		return translated, fmt.Errorf("%w: IPv6 destination %s embeds an illegal IPv4 address", ErrUnsupportedDestIP, ip.DstIP)
+	}
+
 	translated.SrcIP = t.mapIPv6ToIPv4(ip.SrcIP)
 	translated.DstIP = t.mapIPv6ToIPv4(ip.DstIP)
 

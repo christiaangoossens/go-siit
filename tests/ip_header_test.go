@@ -408,3 +408,97 @@ func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 		t.Fatalf("all translated packets carry the same IPv4 Identification: %v", ids)
 	}
 }
+
+// RFC 7915 Section 5.1 (SHOULD, with RFC 1812 Section 5.3.7): with a Network-Specific Prefix every IPv4 address can
+// be embedded, so an IPv6 address embedding an unspecified, loopback, link-local, multicast or broadcast IPv4 address
+// would be translated into an illegal IPv4 source or destination. It is rejected like the IPv4 direction. Explicit
+// address mappings (RFC 7757) are exempt, and a global address still translates.
+func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
+	embed := func(prefix string, address string) net.IP {
+		ipv4 := net.ParseIP(address).To4()
+		ipv6 := net.ParseIP(prefix).To16()
+		if prefix == "2001:db8:64::" {
+			copy(ipv6[12:], ipv4)
+		} else {
+			copy(ipv6[9:], ipv4) // /64: the IPv4 address follows the zero u octet
+		}
+		return ipv6
+	}
+	translators := map[string]struct {
+		translator *siit.Translator
+		prefix     string
+	}{
+		"network-specific /96": {translatorWithPrefix(t, "2001:db8:64::/96", nil), "2001:db8:64::"},
+		"network-specific /64": {translatorWithPrefix(t, "2001:db8:64:64::/64", nil), "2001:db8:64:64::"},
+	}
+	global := "198.51.100.7"
+	for name, setup := range translators {
+		prefix := setup.prefix
+		for _, address := range []string{"0.0.0.0", "127.0.0.1", "127.1.1.1", "169.254.0.42", "224.0.0.1", "239.255.255.250", "255.255.255.255"} {
+			t.Run(fmt.Sprintf("%s/source %s", name, address), func(t *testing.T) {
+				packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, address), embed(prefix, global))
+				result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+				if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.Packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedSrcIP", err, len(result.Packet))
+				}
+			})
+			t.Run(fmt.Sprintf("%s/destination %s", name, address), func(t *testing.T) {
+				packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, global), embed(prefix, address))
+				result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+				if !errors.Is(err, siit.ErrUnsupportedDestIP) || result.Packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedDestIP", err, len(result.Packet))
+				}
+			})
+		}
+		t.Run(name+"/global addresses still translate", func(t *testing.T) {
+			packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, global), embed(prefix, "203.0.113.9"))
+			result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+			if err != nil || result.Packet == nil {
+				t.Fatalf("legal embedded addresses were rejected: %v", err)
+			}
+		})
+	}
+
+	t.Run("explicit address mappings are exempt", func(t *testing.T) {
+		translator := translatorWithPrefix(t, "2001:db8:64::/96", siit.RawEAMTable{{IPv4Prefix: "127.0.0.9/32", IPv6Prefix: "2001:db8:eeee::9/128"}})
+		packet := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("2001:db8:eeee::9"), embed("2001:db8:64::", global))
+		result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+		if err != nil || result.Packet == nil {
+			t.Fatalf("EAM-mapped address was rejected: %v", err)
+		}
+	})
+}
+
+// RFC 7915 Section 4.1: the IPv4 Protocol field is translated to the IPv6 Next Header field. The IPv6 extension
+// headers Hop-by-Hop (0), Routing (43), Fragment (44) and Destination Options (60) have no IPv4 equivalent, and
+// copying them would make the receiver parse the payload as an extension header. Such packets are rejected, whole or
+// fragmented, while ordinary and unknown protocol numbers are forwarded unchanged.
+func TestTranslateRejectsIPv6ExtensionHeaderProtocolNumbers(t *testing.T) {
+	translate := func(t *testing.T, protocol layers.IPProtocol, flags layers.IPv4Flag) (siit.TranslatedPacket, error) {
+		t.Helper()
+		ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: protocol, Flags: flags, SrcIP: ipv4Source, DstIP: ipv4Dest}
+		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 64))), layers.LayerTypeIPv4, gopacket.Default)
+		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	}
+	for _, protocol := range []layers.IPProtocol{layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Fragment, layers.IPProtocolIPv6Destination} {
+		for name, flags := range map[string]layers.IPv4Flag{"whole": 0, "more fragments": layers.IPv4MoreFragments} {
+			t.Run(fmt.Sprintf("protocol %d %s", protocol, name), func(t *testing.T) {
+				result, err := translate(t, protocol, flags)
+				if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.Packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.Packet))
+				}
+			})
+		}
+	}
+	for _, protocol := range []layers.IPProtocol{16, 69, 135, 253} {
+		t.Run(fmt.Sprintf("protocol %d is forwarded", protocol), func(t *testing.T) {
+			result, err := translate(t, protocol, 0)
+			if err != nil || result.Packet == nil {
+				t.Fatalf("ordinary protocol was rejected: %v", err)
+			}
+			if result.Packet[6] != byte(protocol) {
+				t.Fatalf("Next Header = %d, want %d", result.Packet[6], protocol)
+			}
+		})
+	}
+}

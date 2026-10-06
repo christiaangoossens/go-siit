@@ -125,6 +125,17 @@ func (t *Translator) isForbiddenIPv6(ipv6 net.IP) bool {
 	return isNonGlobalIPv4(mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6))
 }
 
+// isIllegalIPv4Embedded reports whether an IPv6 address inside the NAT64 prefix embeds an IPv4 address that is not
+// global unicast (unspecified, loopback, link-local, multicast, broadcast). Such an address would be an illegal IPv4
+// source or destination (RFC 1812 Section 5.3.7). EAM entries are explicit and therefore exempt.
+func (t *Translator) isIllegalIPv4Embedded(ipv6 net.IP) bool {
+	if t.mapIPv6ToIPv4EAM(ipv6) != nil || !t.nat64Net.Contains(ipv6) {
+		return false
+	}
+
+	return !mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6).IsGlobalUnicast()
+}
+
 /**
  * General mapping functions
  */
