@@ -2,6 +2,7 @@ package siit_test
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -9,28 +10,36 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-func ipv4ICMPPacket(t *testing.T, messageType, code uint8, payload []byte) gopacket.Packet {
-	t.Helper()
-	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, code)}
-	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+// RFC 7915 Section 4.2: the remaining ICMPv4 types and Destination Unreachable codes are silently dropped.
+func TestTranslateDropsRemainingICMPv4ErrorCodes(t *testing.T) {
+	inner := ipv4TCPPacket(t, defaultTTL).Data()
+	for _, test := range []struct {
+		name     string
+		icmpType uint8
+		code     uint8
+	}{
+		{name: "unreachable code 16", icmpType: layers.ICMPv4TypeDestinationUnreachable, code: 16},
+		{name: "unreachable code 255", icmpType: layers.ICMPv4TypeDestinationUnreachable, code: 255},
+		{name: "redirect", icmpType: layers.ICMPv4TypeRedirect, code: 1},
+		{name: "source quench", icmpType: 4, code: 0},
+		{name: "alternate host address", icmpType: 6, code: 0},
+		{name: "parameter problem code 3", icmpType: layers.ICMPv4TypeParameterProblem, code: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := testTranslator().TranslateIPv4(ipv4ICMPPacket(t, test.icmpType, test.code, inner), siit.TranslationOverrides{})
+			requireDropped(t, result, err)
+		})
+	}
 }
 
-func ipv6ICMPPacket(t *testing.T, messageType, code uint8, payload []byte) gopacket.Packet {
-	return ipv6ICMPPacketWithRestHeader(t, messageType, code, make([]byte, icmpErrorRestHeaderSize), payload)
-}
-
-func ipv6ICMPPacketWithRestHeader(t *testing.T, messageType, code uint8, restHeader, payload []byte) gopacket.Packet {
-	t.Helper()
-	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(messageType, code)}
-	if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
-		t.Fatal(err)
+// RFC 7915 Section 5.2: unknown ICMPv6 informational and error messages are silently dropped.
+func TestTranslateDropsUnknownICMPv6Messages(t *testing.T) {
+	for _, messageType := range []uint8{5, 100, 127, 144, 200, 255} {
+		t.Run(fmt.Sprintf("type %d", messageType), func(t *testing.T) {
+			result, err := testTranslator().TranslateIPv6(ipv6ICMPPacket(t, messageType, 0, make([]byte, 8)), siit.TranslationOverrides{})
+			requireDropped(t, result, err)
+		})
 	}
-	if len(restHeader) != icmpErrorRestHeaderSize {
-		t.Fatalf("ICMPv6 rest header must be %d bytes, got %d", icmpErrorRestHeaderSize, len(restHeader))
-	}
-	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(append(restHeader, payload...))), layers.LayerTypeIPv6, gopacket.Default)
 }
 
 // RFC 7915 Section 4.2: non-Internet IPv4 control queries and unknown types are silently dropped individually.
@@ -47,8 +56,11 @@ func TestTranslateDropsUnsupportedIPv4ICMPQueriesIndividually(t *testing.T) {
 		{name: "information reply", messageType: layers.ICMPv4TypeInfoReply},
 		{name: "address mask request", messageType: layers.ICMPv4TypeAddressMaskRequest},
 		{name: "address mask reply", messageType: layers.ICMPv4TypeAddressMaskReply},
-		{name: "IGMP", messageType: 0x22},
+		{name: "unassigned type 0x22", messageType: 0x22},
 		{name: "unknown", messageType: 255},
+		{name: "redirect", messageType: layers.ICMPv4TypeRedirect},
+		{name: "alternate host address", messageType: 6},
+		{name: "source quench", messageType: 4},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -116,4 +128,15 @@ func TestTranslateRejectsInvalidICMPv6Codes(t *testing.T) {
 			requireRejected(t, result, err)
 		})
 	}
+}
+
+// RFC 7915 Sections 4.2 and 5.2: unsupported ICMP error codes are silently dropped.
+func TestTranslateDropsUnsupportedICMPErrorCodes(t *testing.T) {
+	ipv4 := ipv4ICMPPacket(t, layers.ICMPv4TypeParameterProblem, 1, make([]byte, 8))
+	result, err := testTranslator().TranslateIPv4(ipv4, siit.TranslationOverrides{})
+	requireDropped(t, result, err)
+
+	ipv6 := ipv6ICMPPacket(t, layers.ICMPv6TypeParameterProblem, 2, make([]byte, 8))
+	result, err = testTranslator().TranslateIPv6(ipv6, siit.TranslationOverrides{})
+	requireDropped(t, result, err)
 }

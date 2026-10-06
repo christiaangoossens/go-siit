@@ -2,6 +2,7 @@ package siit_test
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"testing"
 
@@ -235,45 +236,6 @@ func TestTranslateUDPPayloadVariants(t *testing.T) {
 	}
 }
 
-// RFC 7757: explicit address mappings are supplied through the EAM table.
-func TestTranslateUsesEAMMappings(t *testing.T) {
-	translator := testTranslatorWithEAM(siit.RawEAMTable{
-		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
-		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
-	})
-
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv4(ipv4TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
-	})
-	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-	ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-	if !ip.SrcIP.Equal(net.ParseIP("2001:db8::10")) || !ip.DstIP.Equal(net.ParseIP("2001:db8::20")) {
-		t.Fatalf("EAM mapping was ignored: %s -> %s", ip.SrcIP, ip.DstIP)
-	}
-
-	result = mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		input := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("2001:db8::10"), net.ParseIP("2001:db8::20"))
-		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
-	})
-	packet = gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
-	ip4 := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	if !ip4.SrcIP.Equal(ipv4Source) || !ip4.DstIP.Equal(ipv4Dest) {
-		t.Fatalf("reverse EAM mapping was ignored: %s -> %s", ip4.SrcIP, ip4.DstIP)
-	}
-
-	oneSidedTranslator := testTranslatorWithEAM(siit.RawEAMTable{
-		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
-	})
-	result = mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return oneSidedTranslator.TranslateIPv4(ipv4TCPPacket(t, defaultTTL), siit.TranslationOverrides{})
-	})
-	packet = gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-	ip = packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-	if !ip.SrcIP.Equal(net.ParseIP("2001:db8::10")) || !ip.DstIP.Equal(ipv4TranslatedDest) {
-		t.Fatalf("one-sided EAM mapping was applied incorrectly: %s -> %s", ip.SrcIP, ip.DstIP)
-	}
-}
-
 // Local API contract: PreventTTLDecrement preserves the input TTL or Hop Limit in either direction.
 func TestTranslateCanPreserveTTLAndHopLimit(t *testing.T) {
 	ipv4Result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
@@ -343,38 +305,54 @@ func TestTranslateRejectsOversizedIPv4Packet(t *testing.T) {
 	}
 }
 
-// Local packet-size contract: a 1500-byte IPv6 MTU permits unfragmented IPv4 packets up to 1480 bytes.
+// Local packet-size contract: nothing is ever fragmented, so with a 1500-byte IPv6 MTU a packet that does not
+// fit (1481 bytes unfragmented, 1473 bytes already fragmented) is rejected with ErrPacketOversized, never
+// truncated, forwarded, or fragmented.
 func TestTranslateUsesConfiguredMTU(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		packetSize int
+		fragmented bool
 		wantError  bool
 	}{
 		{name: "maximum packet", packetSize: 1480},
 		{name: "oversized packet", packetSize: 1481, wantError: true},
+		{name: "maximum fragment", packetSize: 1472, fragmented: true},
+		{name: "oversized fragment", packetSize: 1473, fragmented: true, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			payload := bytes.Repeat([]byte{0xab}, test.packetSize-ipv4HeaderLength-udpHeaderLength)
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP, SrcIP: ipv4Source, DstIP: ipv4Dest}
-			udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}
-			if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
-				t.Fatal(err)
+			var input gopacket.Packet
+			if test.fragmented {
+				ip.Flags = layers.IPv4MoreFragments
+				input = gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.packetSize-ipv4HeaderLength))), layers.LayerTypeIPv4, gopacket.Default)
+			} else {
+				udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}
+				if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+					t.Fatal(err)
+				}
+				payload := bytes.Repeat([]byte{0xab}, test.packetSize-ipv4HeaderLength-udpHeaderLength)
+				input = gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 			}
-			input := gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
-			translator := testTranslator()
-			translator.MTU = 1500
-			result, err := translator.TranslateIPv4(input, siit.TranslationOverrides{})
+			result, err := translatorWithMTU(t, 1500).TranslateIPv4(input, siit.TranslationOverrides{})
 			if test.wantError {
-				if err == nil || result.Packet != nil {
-					t.Fatalf("oversized IPv4 packet was not rejected: result length=%d err=%v", len(result.Packet), err)
+				if !errors.Is(err, siit.ErrPacketOversized) || result.Packet != nil {
+					t.Fatalf("oversized IPv4 packet was not rejected with ErrPacketOversized: result length=%d err=%v", len(result.Packet), err)
 				}
 				return
 			}
-			if err != nil || result.Packet == nil {
-				t.Fatalf("maximum IPv4 packet was rejected: result length=%d err=%v", len(result.Packet), err)
+			if err != nil || len(result.Packet) != test.packetSize+ipv6HeaderLength-ipv4HeaderLength+boolToInt(test.fragmented)*8 {
+				t.Fatalf("maximum IPv4 packet was not translated to a full-size IPv6 packet: result length=%d err=%v", len(result.Packet), err)
 			}
 		})
 	}
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func TestNewTranslatorWithMTURejectsValuesBelowIPv6Minimum(t *testing.T) {

@@ -1,6 +1,7 @@
 package siit_test
 
 import (
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -14,11 +15,16 @@ var (
 	ipv4Dest             = net.ParseIP("2.2.2.2").To4()
 	ipv4TranslatedSource = net.ParseIP("64:ff9b::101:101").To16()
 	ipv4TranslatedDest   = net.ParseIP("64:ff9b::202:202").To16()
-	ipv6Source           = net.ParseIP("2001:db8::1")
+	// Both IPv6 endpoints are inside the RFC 6052 prefix so that plain traffic is mappable in both directions.
+	ipv6Source           = net.ParseIP("64:ff9b::808:808")
 	ipv6Dest             = net.ParseIP("64:ff9b::101:101")
-	ipv6TranslatedSource = ipv4RouterAddress
+	ipv6TranslatedSource = net.ParseIP("8.8.8.8")
 	ipv6TranslatedDest   = net.ParseIP("1.1.1.1")
-	ipv4RouterAddress    = net.ParseIP("192.0.0.2")
+	// A globally routable router address: RFC 6052 Section 3.1 forbids mapping non-global IPv4 addresses
+	// into the Well-Known Prefix, so the router address must be global for generated errors to be valid.
+	ipv4RouterAddress = net.ParseIP("9.9.9.9")
+	// An IPv6 address outside the NAT64 prefix with no EAM entry: it has no stateless IPv4 mapping.
+	ipv6Unmappable = net.ParseIP("2001:db8::1")
 )
 
 const (
@@ -48,6 +54,23 @@ const (
 	icmpv4DestUnreachable   = 3
 	icmpv6DestUnreachable   = 1
 )
+
+func translatorWithPrefix(t *testing.T, prefix string, eamTable siit.RawEAMTable) *siit.Translator {
+	t.Helper()
+	_, nat64Net, err := net.ParseCIDR(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return translator
+}
+
+func netIP(address string) net.IP {
+	return net.ParseIP(address)
+}
 
 func testTranslator() *siit.Translator {
 	return testTranslatorWithEAM(nil)
@@ -245,4 +268,103 @@ func ipv4UDPPacket(t *testing.T, payload []byte) gopacket.Packet {
 		t.Fatal(err)
 	}
 	return gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+}
+
+// ipv4ICMPPacketWithRest builds an ICMPv4 message whose second header word (Identifier/Sequence) is set.
+// For RFC 4884 errors octet 4 is the Parameter Problem pointer and octet 5 is the original datagram length.
+func ipv4ICMPPacketWithRest(t *testing.T, messageType, code uint8, id, seq uint16, payload []byte) gopacket.Packet {
+	t.Helper()
+	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Dest, DstIP: ipv4Source}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, code), Id: id, Seq: seq}
+	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+}
+
+// ipv6ICMPErrorPacket builds an ICMPv6 error with explicit addresses and the mandatory four-byte
+// type-specific word (RFC 4443 Sections 3.1-3.4) in front of the quoted packet.
+func ipv6ICMPErrorPacket(t *testing.T, src, dst net.IP, messageType, code uint8, rest, quoted []byte) gopacket.Packet {
+	t.Helper()
+	if len(rest) != icmpErrorRestHeaderSize {
+		t.Fatalf("ICMPv6 rest header must be %d bytes, got %d", icmpErrorRestHeaderSize, len(rest))
+	}
+	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: src, DstIP: dst}
+	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(messageType, code)}
+	if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatal(err)
+	}
+	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(append(append([]byte{}, rest...), quoted...))), layers.LayerTypeIPv6, gopacket.Default)
+}
+
+// icmpv6ErrorQuote returns the packet quoted by an ICMPv6 error: everything after the type-specific word.
+func icmpv6ErrorQuote(t *testing.T, packet gopacket.Packet) gopacket.Packet {
+	t.Helper()
+	icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	if !ok || len(icmp.Payload) < icmpErrorRestHeaderSize {
+		t.Fatalf("missing translated ICMPv6 error: %v", packet.ErrorLayer())
+	}
+	return gopacket.NewPacket(icmp.Payload[icmpErrorRestHeaderSize:], layers.LayerTypeIPv6, gopacket.Default)
+}
+
+func zeroRestHeader() []byte { return make([]byte, icmpErrorRestHeaderSize) }
+
+func ipv4ICMPPacket(t *testing.T, messageType, code uint8, payload []byte) gopacket.Packet {
+	t.Helper()
+	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, code)}
+	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
+}
+
+func ipv6ICMPPacket(t *testing.T, messageType, code uint8, payload []byte) gopacket.Packet {
+	return ipv6ICMPPacketWithRestHeader(t, messageType, code, make([]byte, icmpErrorRestHeaderSize), payload)
+}
+
+func ipv6ICMPPacketWithRestHeader(t *testing.T, messageType, code uint8, restHeader, payload []byte) gopacket.Packet {
+	t.Helper()
+	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(messageType, code)}
+	if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatal(err)
+	}
+	if len(restHeader) != icmpErrorRestHeaderSize {
+		t.Fatalf("ICMPv6 rest header must be %d bytes, got %d", icmpErrorRestHeaderSize, len(restHeader))
+	}
+	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(append(restHeader, payload...))), layers.LayerTypeIPv6, gopacket.Default)
+}
+
+func icmpPointer(pointer uint32) []byte {
+	result := make([]byte, 4)
+	binary.BigEndian.PutUint32(result, pointer)
+	return result
+}
+
+func icmpPointerValue(t *testing.T, payload []byte) uint32 {
+	t.Helper()
+	if len(payload) < 4 {
+		t.Fatalf("ICMP Parameter Problem payload is too short: %d", len(payload))
+	}
+	return binary.BigEndian.Uint32(payload[:4])
+}
+
+func tcpSegment(t *testing.T, network gopacket.NetworkLayer, payload []byte) []byte {
+	t.Helper()
+	tcp := &layers.TCP{
+		SrcPort: testSourcePort, DstPort: testTCPDestinationPort, Seq: testTCPSequence,
+		ACK: true, Window: testTCPWindow, DataOffset: 5,
+	}
+	if err := tcp.SetNetworkLayerForChecksum(network); err != nil {
+		t.Fatal(err)
+	}
+	return serializeTestPacket(t, tcp, gopacket.Payload(payload))
+}
+
+func translatorWithMTU(t *testing.T, mtu uint32) *siit.Translator {
+	t.Helper()
+	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
+	if err != nil {
+		t.Fatal(err)
+	}
+	translator, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, mtu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return translator
 }
