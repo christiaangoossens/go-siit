@@ -10,183 +10,148 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.2, 4.5, 5.2, and 5.5: echo messages translate in both directions with valid checksums.
-func TestTranslateICMPEchoBothDirections(t *testing.T) {
+// RFC 7915 Sections 4.2 and 5.2 (MUST): Echo Request and Reply are translated in both directions, keeping
+// Identifier, Sequence Number and data, with the ICMPv6 pseudo-header added or dropped in the checksum
+// (Sections 4.5 and 5.5; the checksum values themselves are covered in checksum_test.go).
+func TestTranslateICMPEcho(t *testing.T) {
 	tests := []struct {
-		name        string
-		messageType uint8
-		messageID   uint16
-		sequence    uint16
-		payload     []byte
-		ipv6Type    uint8
+		name    string
+		v4Type  uint8
+		v6Type  uint8
+		id, seq uint16
+		payload []byte
 	}{
-		{name: "request", messageType: echoRequest, messageID: 0x1234, sequence: 7, payload: []byte("echo"), ipv6Type: 128},
-		{name: "reply", messageType: echoReply, messageID: 0x4321, sequence: 9, payload: []byte("reply"), ipv6Type: 129},
+		{name: "request", v4Type: echoRequest, v6Type: layers.ICMPv6TypeEchoRequest, id: 0x1234, seq: 7, payload: []byte("echo")},
+		{name: "reply", v4Type: echoReply, v6Type: layers.ICMPv6TypeEchoReply, id: 0x4321, seq: 9, payload: []byte("reply")},
+		{name: "without data", v4Type: echoRequest, v6Type: layers.ICMPv6TypeEchoRequest, id: 1, seq: 0xffff},
+		{name: "with a large payload", v4Type: echoReply, v6Type: layers.ICMPv6TypeEchoReply, id: 0xffff, seq: 1, payload: bytes.Repeat([]byte{0xa5}, 1200)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(test.messageType, 0), Id: test.messageID, Seq: test.sequence}
+			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(test.v4Type, 0), Id: test.id, Seq: test.seq}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(test.payload)), layers.LayerTypeIPv4, gopacket.Default)
-			translated6 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-			})
-			packet6 := gopacket.NewPacket(translated6, layers.LayerTypeIPv6, gopacket.Default)
-			icmp6, ok := packet6.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-			if !ok || icmp6.TypeCode.Type() != test.ipv6Type || icmp6.Checksum == 0 {
-				t.Fatalf("IPv4 ICMP %s was not translated with a checksum: %v", test.name, packet6.ErrorLayer())
+			v6 := translateToICMPv6(t, testTranslator(), input)
+			echo, ok := v6.packet.Layer(layers.LayerTypeICMPv6Echo).(*layers.ICMPv6Echo)
+			if v6.icmp.TypeCode.Type() != test.v6Type || v6.icmp.TypeCode.Code() != 0 || !ok || echo.Identifier != test.id || echo.SeqNumber != test.seq || !bytes.HasSuffix(v6.raw, test.payload) || len(v6.raw) != ipv6HeaderLength+8+len(test.payload) {
+				t.Fatalf("ICMPv4 echo was not translated with its fields: %+v", v6.icmp)
 			}
-			echo6, ok := packet6.Layer(layers.LayerTypeICMPv6Echo).(*layers.ICMPv6Echo)
-			if !ok || echo6.Identifier != test.messageID || echo6.SeqNumber != test.sequence || !bytes.HasSuffix(packet6.Data(), test.payload) {
-				t.Fatalf("IPv4 ICMP %s echo data changed: %+v", test.name, echo6)
-			}
-			if icmp6.Checksum != recalculatedICMPv6Checksum(t, packet6.Layer(layers.LayerTypeIPv6).(*layers.IPv6), icmp6) {
-				t.Fatalf("IPv4 ICMP %s checksum is invalid: %#x", test.name, icmp6.Checksum)
-			}
-
-			translated4 := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv6(packet6, siit.TranslationOverrides{})
-			})
-			packet4 := gopacket.NewPacket(translated4, layers.LayerTypeIPv4, gopacket.Default)
-			icmp4, ok := packet4.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-			if !ok || icmp4.TypeCode.Type() != test.messageType || icmp4.Id != test.messageID || icmp4.Seq != test.sequence || icmp4.Checksum == 0 || !bytes.HasSuffix(packet4.Data(), test.payload) {
-				t.Fatalf("ICMPv6 %s was not translated back with its fields and checksum: %v", test.name, packet4.ErrorLayer())
-			}
-			if icmp4.Checksum != recalculatedICMPv4Checksum(t, icmp4) {
-				t.Fatalf("ICMPv6 %s checksum is invalid: %#x", test.name, icmp4.Checksum)
+			v4 := translateToICMPv4(t, testTranslator(), v6.packet)
+			if v4.icmp.TypeCode != layers.CreateICMPv4TypeCode(test.v4Type, 0) || v4.icmp.Id != test.id || v4.icmp.Seq != test.seq || !bytes.HasSuffix(v4.raw, test.payload) || len(v4.raw) != ipv4HeaderLength+8+len(test.payload) {
+				t.Fatalf("ICMPv6 echo was not translated back with its fields: %+v", v4.icmp)
 			}
 		})
 	}
 }
 
-// Local policy (RFC 792 defines Echo Code 0 only; RFC 7915 does not specify other codes): a nonzero code is rejected.
+// Local policy (RFC 792 and RFC 4443 Section 4.1 define Echo Code 0 only; RFC 7915 does not specify other codes):
+// an Echo with a nonzero code is rejected in both directions.
 func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
-	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(echoRequest, 1), Id: 1, Seq: 1}
-	input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp), layers.LayerTypeIPv4, gopacket.Default)
-	if _, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{}); err == nil {
-		t.Fatal("ICMPv4 Echo Request with a nonzero code was accepted")
+	for _, messageType := range []uint8{echoRequest, echoReply} {
+		t.Run(fmt.Sprintf("ICMPv4 type %d", messageType), func(t *testing.T) {
+			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
+			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, 1), Id: 1, Seq: 1}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp), layers.LayerTypeIPv4, gopacket.Default)
+			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			requireRejected(t, result, err)
+		})
+	}
+	for _, messageType := range []uint8{layers.ICMPv6TypeEchoRequest, layers.ICMPv6TypeEchoReply} {
+		t.Run(fmt.Sprintf("ICMPv6 type %d", messageType), func(t *testing.T) {
+			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+			icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(messageType, 1)}
+			if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
+				t.Fatal(err)
+			}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload([]byte{0, 1, 0, 1})), layers.LayerTypeIPv6, gopacket.Default)
+			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			requireRejected(t, result, err)
+		})
 	}
 }
 
-// Local policy (RFC 4443 Section 4.1 defines Echo Code 0 only; RFC 7915 does not specify other codes): a nonzero code is rejected.
-func TestTranslateICMPv6EchoRejectsNonzeroCode(t *testing.T) {
-	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(layers.ICMPv6TypeEchoRequest, 1)}
-	if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
-		t.Fatal(err)
-	}
-	input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload([]byte("echo"))), layers.LayerTypeIPv6, gopacket.Default)
-	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	requireRejected(t, result, err)
-}
-
-// RFC 7915 Figures 3 and 6 with RFC 792 / RFC 4443: ICMPv4 carries the Parameter Problem pointer in
-// octet 4 of the message; ICMPv6 carries a 32-bit pointer in the type-specific word.
+// RFC 7915 Figures 3 and 6 (MUST) with RFC 792 / RFC 4443: the Parameter Problem pointer is mapped octet by octet
+// to the pointer of the other family, and pointers to a field that has no counterpart ("n/a") cause a silent drop.
+// ICMPv4 carries the pointer in octet 4 of the message (codes 0 and 2 alike), ICMPv6 a 32-bit pointer. Every ICMPv4
+// pointer 0-20 and every ICMPv6 pointer 0-41 is covered.
 func TestTranslateICMPParameterProblemPointers(t *testing.T) {
-
-	ipv4ToIPv6 := []struct {
-		name string
-		from uint8
-		to   uint32
-	}{
-		{name: "version", from: 0, to: 0},
-		{name: "traffic class", from: 1, to: 1},
-		{name: "total length high", from: 2, to: 4},
-		{name: "total length low", from: 3, to: 4},
-		{name: "time to live", from: 8, to: 7},
-		{name: "protocol", from: 9, to: 6},
-		{name: "source address first", from: 12, to: 8},
-		{name: "source address last", from: 15, to: 8},
-		{name: "destination address first", from: 16, to: 24},
-		{name: "destination address last", from: 19, to: 24},
-	}
-	for _, test := range ipv4ToIPv6 {
-		t.Run("IPv4 to IPv6 "+test.name, func(t *testing.T) {
-			input := ipv4ICMPPacketWithRest(t, layers.ICMPv4TypeParameterProblem, 0, uint16(test.from)<<8, 0, ipv4TCPPacket(t, defaultTTL).Data())
-			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-			if err != nil || result.Packet == nil {
-				t.Fatalf("Parameter Problem pointer %d was not translated: err=%v", test.from, err)
+	const drop = -1
+	ipv4Pointers := map[uint8]int{0: 0, 1: 1, 2: 4, 3: 4, 8: 7, 9: 6, 12: 8, 13: 8, 14: 8, 15: 8, 16: 24, 17: 24, 18: 24, 19: 24}
+	for _, code := range []uint8{0, 2} {
+		for pointer := 0; pointer <= 20; pointer++ {
+			want, mapped := ipv4Pointers[uint8(pointer)]
+			if !mapped {
+				want = drop // total length excepted, IPv4 octets 4-7, 10 and 11 and everything past the header are n/a
 			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
-			translated, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-			if !ok || translated.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
-				t.Fatalf("missing translated ICMPv6 Parameter Problem: %v", packet.ErrorLayer())
-			}
-			if got := icmpPointerValue(t, translated.Payload); got != test.to {
-				t.Fatalf("mapped pointer %d to %d, want %d", test.from, got, test.to)
-			}
-		})
+			t.Run(fmt.Sprintf("IPv4 code %d pointer %d", code, pointer), func(t *testing.T) {
+				input := ipv4ICMPPacketWithRest(t, layers.ICMPv4TypeParameterProblem, code, uint16(pointer)<<8, 0, ipv4TCPPacket(t, defaultTTL).Data())
+				if want == drop {
+					result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+					requireDropped(t, result, err)
+					return
+				}
+				result := translateToICMPv6(t, testTranslator(), input)
+				if result.icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
+					t.Fatalf("got %v, want Parameter Problem code 0", result.icmp.TypeCode)
+				}
+				if got := icmpPointerValue(t, result.icmp.Payload); got != uint32(want) {
+					t.Fatalf("mapped pointer %d to %d, want %d", pointer, got, want)
+				}
+			})
+		}
 	}
 
-	ipv6ToIPv4 := []struct {
-		name string
-		from uint32
-		to   uint8
-	}{
-		{name: "version", from: 0, to: 0},
-		{name: "traffic class", from: 1, to: 1},
-		{name: "payload length high", from: 4, to: 2},
-		{name: "payload length low", from: 5, to: 2},
-		{name: "next header", from: 6, to: 9},
-		{name: "hop limit", from: 7, to: 8},
-		{name: "source address first", from: 8, to: 12},
-		{name: "source address last", from: 23, to: 12},
-		{name: "destination address first", from: 24, to: 16},
-		{name: "destination address last", from: 39, to: 16},
+	ipv6Pointer := func(pointer int) int {
+		switch {
+		case pointer == 0, pointer == 1:
+			return pointer
+		case pointer == 4, pointer == 5:
+			return 2
+		case pointer == 6:
+			return 9
+		case pointer == 7:
+			return 8
+		case pointer >= 8 && pointer <= 23:
+			return 12
+		case pointer >= 24 && pointer <= 39:
+			return 16
+		}
+		return drop
 	}
-	for _, test := range ipv6ToIPv4 {
-		t.Run("IPv6 to IPv4 "+test.name, func(t *testing.T) {
-			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(test.from), ipv6TCPPacket(t, defaultTTL).Data())
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-			if err != nil || result.Packet == nil {
-				t.Fatalf("Parameter Problem pointer %d was not translated: err=%v", test.from, err)
-			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
-			translated, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-			if !ok || translated.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeParameterProblem, 0) {
-				t.Fatalf("missing translated ICMPv4 Parameter Problem: %v", packet.ErrorLayer())
-			}
-			if got := uint8(translated.Id >> 8); got != test.to {
-				t.Fatalf("mapped pointer %d to %d in ICMPv4 octet 4, want %d", test.from, got, test.to)
-			}
-			if quote := gopacket.NewPacket(translated.Payload, layers.LayerTypeIPv4, gopacket.Default); quote.Layer(layers.LayerTypeIPv4) == nil {
-				t.Fatalf("translated Parameter Problem does not quote the original packet: %v", quote.ErrorLayer())
-			}
-		})
-	}
-}
-
-// RFC 7915 Figures 3 and 6: pointers marked "n/a" (or outside the listed ranges) cause a silent drop.
-func TestTranslateICMPParameterProblemUnmappablePointersDropped(t *testing.T) {
-	for _, pointer := range []uint8{4, 5, 6, 7, 10, 11, 20, 255} {
-		t.Run(fmt.Sprintf("IPv4 pointer %d", pointer), func(t *testing.T) {
-			input := ipv4ICMPPacketWithRest(t, layers.ICMPv4TypeParameterProblem, 0, uint16(pointer)<<8, 0, ipv4TCPPacket(t, defaultTTL).Data())
-			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-			requireDropped(t, result, err)
-		})
-	}
-	for _, pointer := range []uint32{2, 3, 40, 1000} {
+	for pointer := 0; pointer <= 41; pointer++ {
+		want := ipv6Pointer(pointer)
 		t.Run(fmt.Sprintf("IPv6 pointer %d", pointer), func(t *testing.T) {
-			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(pointer), ipv6TCPPacket(t, defaultTTL).Data())
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-			requireDropped(t, result, err)
+			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(uint32(pointer)), ipv6TCPPacket(t, defaultTTL).Data())
+			if want == drop {
+				result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+				requireDropped(t, result, err)
+				return
+			}
+			result := translateToICMPv4(t, testTranslator(), input)
+			if result.icmp.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeParameterProblem, 0) {
+				t.Fatalf("got %v, want Parameter Problem code 0", result.icmp.TypeCode)
+			}
+			if got := int(result.icmp.Id >> 8); got != want {
+				t.Fatalf("mapped pointer %d to %d in ICMPv4 octet 4, want %d", pointer, got, want)
+			}
 		})
 	}
+	t.Run("IPv6 pointer past the packet", func(t *testing.T) {
+		input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(1000), ipv6TCPPacket(t, defaultTTL).Data())
+		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+		requireDropped(t, result, err)
+	})
 }
 
-// RFC 7915 Section 4.2: Destination Unreachable code 2 becomes Parameter Problem code 1 pointing at Next Header (6).
-func TestTranslateICMPProtocolUnreachablePointsAtNextHeader(t *testing.T) {
-	input := ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 2, ipv4TCPPacket(t, defaultTTL).Data())
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	})
-	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-	icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-	if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 1) {
-		t.Fatalf("unexpected translation of Protocol Unreachable: %v", packet.ErrorLayer())
+// RFC 7915 Sections 4.2 and 5.2 (MUST): Destination Unreachable code 2 becomes Parameter Problem code 1 pointing
+// at the IPv6 Next Header (6), and Parameter Problem code 1 becomes Destination Unreachable code 2 (Protocol).
+func TestTranslateProtocolUnreachableAndUnrecognizedNextHeader(t *testing.T) {
+	v6 := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 2, ipv4TCPPacket(t, defaultTTL).Data()))
+	if v6.icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 1) || icmpPointerValue(t, v6.icmp.Payload) != 6 {
+		t.Fatalf("unexpected translation of Protocol Unreachable: %v pointer %d", v6.icmp.TypeCode, icmpPointerValue(t, v6.icmp.Payload))
 	}
-	if got := icmpPointerValue(t, icmp.Payload); got != 6 {
-		t.Fatalf("pointer is %d, want 6 (IPv6 Next Header)", got)
+	v4 := translateToICMPv4(t, testTranslator(), ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 1, icmpPointer(40), ipv6TCPPacket(t, defaultTTL).Data()))
+	if v4.icmp.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 2) {
+		t.Fatalf("unexpected translation of Unrecognized Next Header: %v", v4.icmp.TypeCode)
 	}
 }

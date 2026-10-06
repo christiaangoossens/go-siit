@@ -3,132 +3,109 @@ package siit_test
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
-	siit "github.com/christiaangoossens/go-siit"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.2 and 4.3, RFC 4884 Sections 3 and 4: IPv4 ICMP extensions survive IPv4-to-IPv6 translation with an updated length.
-func TestTranslateIPv4ICMPErrorPreservesExtension(t *testing.T) {
-	inner := ipv4TCPPacket(t, defaultTTL).Data()
-	inner = append(inner, make([]byte, 128-len(inner))...)
+// paddedDatagram zero-pads the quoted packet to the "original datagram" field of RFC 4884 Section 4: at least
+// 128 octets and a whole number of words of the given size.
+// icmpv6TypeFor maps the ICMPv4 error types under test to their ICMPv6 counterparts (RFC 7915 Section 4.2).
+var icmpv6TypeFor = map[uint8]uint8{
+	3:  layers.ICMPv6TypeDestinationUnreachable,
+	11: layers.ICMPv6TypeTimeExceeded,
+}
+
+func paddedDatagram(quote []byte, word int) []byte {
+	size := max(128, (len(quote)+word-1)/word*word)
+	return append(append(make([]byte, 0, size), quote...), make([]byte, size-len(quote))...)
+}
+
+// opaqueExtension returns an extension structure (RFC 4884 Section 7) of the given size with a valid checksum
+// and an object whose content is meaningless to the translator.
+func opaqueExtension(size int) []byte {
+	extension := make([]byte, size)
+	extension[0] = 0x20
+	binary.BigEndian.PutUint16(extension[4:6], uint16(size-4))
+	extension[6], extension[7] = 1, 1
+	binary.BigEndian.PutUint16(extension[2:4], checksum(extension))
+	return extension
+}
+
+// RFC 7915 Sections 4.2 and 5.2 (MUST) with RFC 4884 Sections 3, 4 and 7: an ICMP extension structure is carried
+// over after the translated quote, and the Length attribute (octet 5 in 32-bit words for ICMPv4, octet 4 in 64-bit
+// words for ICMPv6) is recomputed for the translated, zero-padded original datagram. The quoted packet grows by 20
+// octets towards IPv6 and shrinks by 20 towards IPv4, so the length changes with the size of the quote in both
+// directions. Extensions are only defined for Destination Unreachable and Time Exceeded.
+func TestTranslateICMPExtensions(t *testing.T) {
 	extension := icmpExtension()
-	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeDestinationUnreachable, 3, inner, extension)
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	})
-	outer := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-	icmp, ok := outer.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-	if !ok {
-		t.Fatalf("missing translated ICMPv6 layer: %v", outer.ErrorLayer())
-	}
-	if icmp.Checksum != recalculatedICMPv6Checksum(t, outer.Layer(layers.LayerTypeIPv6).(*layers.IPv6), icmp) {
-		t.Fatalf("translated ICMPv6 extension checksum is invalid: %#x", icmp.Checksum)
-	}
-	requireICMPv6Extension(t, icmp, extension)
-}
-
-// RFC 7915 Sections 4.2, 5.2, and RFC 4884: opaque ICMP extension bytes are preserved and follow the translated quoted packet.
-func TestTranslateICMPErrorPreservesOpaqueExtensionBytes(t *testing.T) {
-	inner := ipv6TCPPacket(t, defaultTTL).Data()
-	inner = append(inner, make([]byte, 128-len(inner))...)
-	extension := icmpExtension()
-	input := ipv6ICMPErrorWithExtension(t, layers.ICMPv6TypeDestinationUnreachable, 4, inner, extension)
-	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if err != nil {
-		t.Fatalf("valid ICMP error with an extension failed: %v", err)
-	}
-	outer := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
-	icmp, ok := outer.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-	if !ok {
-		t.Fatalf("missing translated ICMPv4 layer: %v", outer.ErrorLayer())
-	}
-	if icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) {
-		t.Fatalf("translated ICMPv4 extension checksum is invalid: %#x", icmp.Checksum)
-	}
-	requireICMPv4Extension(t, icmp, extension)
-}
-
-// RFC 4884 Sections 3, 4, and 7: extensions are valid on IPv6 Time Exceeded messages.
-func TestTranslateIPv6ICMPErrorExtensionVariants(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		messageType uint8
-	}{
-		{name: "time exceeded", messageType: layers.ICMPv6TypeTimeExceeded},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			inner := ipv6TCPPacket(t, defaultTTL).Data()
-			inner = append(inner, make([]byte, 128-len(inner))...)
-			input := ipv6ICMPErrorWithExtension(t, test.messageType, 0, inner, icmpExtension())
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	for _, size := range []int{60, 100, 124, 128, 148, 200} {
+		for _, messageType := range []uint8{3, 11} {
+			t.Run(fmt.Sprintf("IPv4 to IPv6/type %d/quote %d octets", messageType, size), func(t *testing.T) {
+				quote := ipv4TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, size-ipv4HeaderLength-20), nil).Data()
+				input := ipv4ICMPErrorWithExtension(t, messageType, 0, paddedDatagram(quote, 4), extension)
+				result := translateToICMPv6(t, testTranslator(), input)
+				requireICMPv6Extension(t, result.icmp, extension)
+				want := max(128, (size+ipv6HeaderLength-ipv4HeaderLength+7)/8*8) / 8
+				if got := int(result.icmp.Payload[0]); got != want {
+					t.Fatalf("ICMPv6 length is %d words, want %d", got, want)
+				}
+				requireQuotedTCPv6Prefix(t, result.quote(t), ipv4TranslatedSource, ipv4TranslatedDest)
 			})
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
-			icmp, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-			if !ok {
-				t.Fatalf("missing translated ICMPv4 layer: %v", packet.ErrorLayer())
-			}
-			requireICMPv4Extension(t, icmp, icmpExtension())
-			if icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) {
-				t.Fatalf("translated ICMPv6 %s extension checksum is invalid: %#x", test.name, icmp.Checksum)
-			}
-		})
+			t.Run(fmt.Sprintf("IPv6 to IPv4/type %d/quote %d octets", messageType, size), func(t *testing.T) {
+				quote := ipv6TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, size-ipv6HeaderLength-20)).Data()
+				input := ipv6ICMPErrorWithExtension(t, icmpv6TypeFor[messageType], 0, paddedDatagram(quote, 8), extension)
+				result := translateToICMPv4(t, testTranslator(), input)
+				requireICMPv4Extension(t, result.icmp, extension)
+				want := max(128, (size-(ipv6HeaderLength-ipv4HeaderLength)+3)/4*4) / 4
+				if got := int(result.icmp.Contents[5]); got != want {
+					t.Fatalf("ICMPv4 length is %d words, want %d", got, want)
+				}
+			})
+		}
 	}
 }
 
-// RFC 4884 Sections 3, 4, and 7: extensions are valid on IPv4 Time Exceeded messages.
-func TestTranslateIPv4ICMPErrorExtensionVariants(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		messageType uint8
-	}{
-		{name: "time exceeded", messageType: layers.ICMPv4TypeTimeExceeded},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			inner := ipv4TCPPacket(t, defaultTTL).Data()
-			inner = append(inner, make([]byte, 128-len(inner))...)
-			input := ipv4ICMPErrorWithExtension(t, test.messageType, 0, inner, icmpExtension())
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-			})
-			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-			icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-			if !ok {
-				t.Fatalf("missing translated ICMPv6 layer: %v", packet.ErrorLayer())
-			}
-			requireICMPv6Extension(t, icmp, icmpExtension())
-			if icmp.Checksum != recalculatedICMPv6Checksum(t, packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6), icmp) {
-				t.Fatalf("translated ICMPv4 %s extension checksum is invalid: %#x", test.name, icmp.Checksum)
-			}
-		})
+func requireQuotedTCPv6Prefix(t *testing.T, quote gopacket.Packet, source, destination []byte) {
+	t.Helper()
+	ip, ok := quote.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	if !ok || !bytes.Equal(ip.SrcIP, source) || !bytes.Equal(ip.DstIP, destination) || ip.NextHeader != layers.IPProtocolTCP {
+		t.Fatalf("quoted IPv6 header is %+v", ip)
 	}
+}
+
+// RFC 7915 Section 4.2 (SHOULD, left out when it cannot be truncated, see the README) with RFC 4884 Section 5:
+// when the extension no longer fits next to a 128-octet quote in the 1280-octet ICMPv6 message, the message is
+// sent with the translated quote only, and the Length attribute is zero.
+func TestTranslateICMPExtensionThatDoesNotFitIsLeftOut(t *testing.T) {
+	quote := ipv4TCPPayloadPacket(t, make([]byte, 128-ipv4HeaderLength-20), nil).Data()
+	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeDestinationUnreachable, 3, paddedDatagram(quote, 4), opaqueExtension(1300))
+	result := translateToICMPv6(t, translatorWithMTU(t, 1500), input)
+	if len(result.raw) > maxIPv6PacketLength || result.icmp.Payload[0] != 0 {
+		t.Fatalf("message of %d octets with length attribute %d, want at most %d octets and no extension", len(result.raw), result.icmp.Payload[0], maxIPv6PacketLength)
+	}
+	requireQuotedTCPv6Prefix(t, result.quote(t), ipv4TranslatedSource, ipv4TranslatedDest)
 }
 
 // RFC 4884 Section 4 defines extensions for ICMPv4 Parameter Problem (octet 4 is the pointer, octet 5 the length),
-// but ICMPv6 Parameter Problem has no room for a length: its pointer occupies the whole four-byte word. The
+// but an ICMPv6 Parameter Problem has no room for a length: its pointer occupies the whole four-byte word. The
 // translated message therefore carries the translated quote only, without the extension structure.
 func TestTranslateIPv4ParameterProblemExtensionIsNotCarriedToICMPv6(t *testing.T) {
-	inner := ipv4TCPPacket(t, defaultTTL).Data()
-	inner = append(inner, make([]byte, 128-len(inner))...)
+	inner := paddedDatagram(ipv4TCPPacket(t, defaultTTL).Data(), 4)
 	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeParameterProblem, 0, inner, icmpExtension())
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	})
-	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
-	icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-	if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
-		t.Fatalf("missing translated ICMPv6 Parameter Problem: %v", packet.ErrorLayer())
+	result := translateToICMPv6(t, testTranslator(), input)
+	if result.icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
+		t.Fatalf("missing translated ICMPv6 Parameter Problem: %v", result.icmp.TypeCode)
 	}
-	if got := icmpPointerValue(t, icmp.Payload); got != 0 {
+	if got := icmpPointerValue(t, result.icmp.Payload); got != 0 {
 		t.Fatalf("pointer is %d, want 0: the RFC 4884 length leaked into the pointer", got)
 	}
-	quote := icmpv6ErrorQuote(t, packet)
+	quote := result.quote(t)
 	quotedIP, ok := quote.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-	if !ok || len(icmp.Payload) != icmpErrorRestHeaderSize+ipv6HeaderLength+int(quotedIP.Length) {
-		t.Fatalf("Parameter Problem carries more than the translated quote (%d octets)", len(icmp.Payload))
+	if !ok || len(result.icmp.Payload) != icmpErrorRestHeaderSize+ipv6HeaderLength+int(quotedIP.Length) {
+		t.Fatalf("Parameter Problem carries more than the translated quote (%d octets)", len(result.icmp.Payload))
 	}
 }
 
@@ -140,12 +117,12 @@ func ipv6ICMPErrorWithExtension(t *testing.T, messageType, code uint8, originalD
 	// RFC 4884 Section 4.4/4.5: octet 4 is the length of the padded original datagram in 64-bit words.
 	restHeader := make([]byte, icmpErrorRestHeaderSize)
 	restHeader[0] = byte(len(originalDatagram) / 8)
-	return ipv6ICMPErrorPacket(t, ipv6Source, ipv6Dest, messageType, code, restHeader, append(append([]byte{}, originalDatagram...), extension...))
+	return ipv6ICMPErrorPacket(t, ipv6Dest, ipv6Source, messageType, code, restHeader, append(append([]byte{}, originalDatagram...), extension...))
 }
 
 func ipv4ICMPErrorWithExtension(t *testing.T, messageType, code uint8, originalDatagram, extension []byte) gopacket.Packet {
 	t.Helper()
-	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
+	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Dest, DstIP: ipv4Source}
 	if len(originalDatagram)%4 != 0 || len(originalDatagram) < 128 {
 		t.Fatalf("ICMPv4 extension original datagram must be at least 128 bytes and 32-bit aligned: %d", len(originalDatagram))
 	}
@@ -163,17 +140,6 @@ func icmpExtension() []byte {
 	extension := []byte{0x20, 0, 0, 0, 0, 4, 0, 0}
 	binary.BigEndian.PutUint16(extension[2:4], checksum(extension))
 	return extension
-}
-
-func checksum(data []byte) uint16 {
-	var sum uint32
-	for index := 0; index+1 < len(data); index += 2 {
-		sum += uint32(binary.BigEndian.Uint16(data[index : index+2]))
-	}
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + sum>>16
-	}
-	return ^uint16(sum)
 }
 
 func requireZeroBytes(t *testing.T, data []byte, what string) {
