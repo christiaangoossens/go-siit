@@ -11,7 +11,7 @@ type Translator struct {
 	// Network prefix used for NAT64 translation, as defined in RFC 6052.
 	nat64Net *net.IPNet
 
-	// Whether nat64Net is the Well-Known Prefix (RFC 6052 Section 3.1).
+	// Whether nat64Net is the Well-Known Prefix (RFC 6052 Section 2.1).
 	wellKnownPrefix bool
 
 	// IPv4 address used for routing and ICMP error generation
