@@ -2,19 +2,24 @@ package siit
 
 import "errors"
 
-// Every rejected packet returns an error that wraps exactly one of these, so errors.Is tells why it was rejected.
+// A rejected packet returns an error that wraps exactly one of these, so errors.Is tells why it was rejected.
 var (
-	ErrInvalidPacket       = errors.New("Invalid packet")
-	ErrInvalidICMP         = errors.New("Invalid ICMP packet")
-	ErrUnsupportedProtocol = errors.New("Unsupported protocol")
+	ErrInvalidPacket       = errors.New("invalid packet")
+	ErrInvalidICMP         = errors.New("invalid ICMP packet")
+	ErrUnsupportedProtocol = errors.New("unsupported protocol")
 	ErrTimeExceeded        = errors.New("TTL or Hop Limit expired")
-	ErrSourceRouteFailed   = errors.New("Unexpired IPv4 source route")
-	ErrUnsupportedSrcIP    = errors.New("Unsupported source IP address")
-	ErrUnsupportedDestIP   = errors.New("Unsupported destination IP address")
-	ErrPacketOversized     = errors.New("Packet is too large to be translated without possible fragmentation")
-	ErrInvalidMTU          = errors.New("MTU is below the IPv6 minimum")
-	ErrInvalidConfig       = errors.New("Invalid translator configuration")
+	ErrSourceRouteFailed   = errors.New("unexpired IPv4 source route")
+	ErrUnsupportedSrcIP    = errors.New("unsupported source IP address")
+	ErrUnsupportedDstIP    = errors.New("unsupported destination IP address")
+	ErrPacketOversized     = errors.New("packet is too large to be translated without possible fragmentation")
 	ErrZeroUDPChecksum     = errors.New("UDP checksum is zero")
+)
+
+// NewTranslator returns an error wrapping ErrInvalidConfig for an invalid Config, and also ErrInvalidMTU when the MTU
+// is the problem.
+var (
+	ErrInvalidConfig = errors.New("invalid translator configuration")
+	ErrInvalidMTU    = errors.New("MTU is below the IPv6 minimum")
 )
 
 // TranslationError is returned for a rejected packet that the translator answers with an ICMP error.
@@ -22,7 +27,7 @@ type TranslationError struct {
 	// Why the packet was rejected, one of the Err values.
 	Err error
 
-	// ICMP error for the sender of the rejected packet. Reply.Version tells which side it must be sent out on.
+	// ICMP error for the sender of the rejected packet, to send back out the side the packet came from.
 	Reply Packet
 }
 

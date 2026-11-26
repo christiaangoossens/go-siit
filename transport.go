@@ -7,9 +7,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * RFC 7915 Sections 4.5 and 5.5 (Transport-Layer Header Translation)
- */
+// RFC 7915 Sections 4.5 and 5.5 (Transport-Layer Header Translation)
 
 // ICMPv4 and ICMPv6 Echo Request/Reply types.
 func translatedEchoType(icmpType byte) (byte, bool) {

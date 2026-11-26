@@ -9,9 +9,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * RFC 7915 Section 4 (Translating from IPv4 to IPv6)
- */
+// RFC 7915 Section 4 (Translating from IPv4 to IPv6)
 
 // TranslateIPv4 translates an IPv4 packet, starting at the IP header, to IPv6. The packet is not modified or retained.
 //
@@ -26,7 +24,8 @@ func (t *Translator) TranslateIPv4(packet []byte) (Packet, error) {
 	return t.translateIPv4(&ip, false)
 }
 
-// TranslateIPv4Layer is like TranslateIPv4, for a packet that is already decoded with gopacket.
+// TranslateIPv4Layer is like TranslateIPv4, for a packet that is already decoded with gopacket. The layer must come
+// from decoding, so that its Contents and Payload match its fields. It is not modified.
 func (t *Translator) TranslateIPv4Layer(ip *layers.IPv4) (Packet, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("%w: no IPv4 layer", ErrInvalidPacket)
@@ -38,13 +37,29 @@ func (t *Translator) TranslateIPv4Layer(ip *layers.IPv4) (Packet, error) {
 // translateIPv4 translates a decoded IPv4 packet to IPv6. quoted is true for the packet inside an ICMPv4 error
 // (RFC 7915 Section 4.3).
 func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error) {
+	// ===
+	// Header validation
+	// ===
+
+	// RFC 791 Section 3.1 defines a 20-byte minimum IPv4 header and requires
+	// Total Length to include that header; reject packets that cannot be parsed.
+	if ip.Version != 4 || ip.IHL < 5 || len(ip.Contents) < int(ip.IHL)*4 || ip.Length < uint16(ip.IHL)*4 {
+		return nil, fmt.Errorf("%w: invalid IPv4 header", ErrInvalidPacket)
+	}
+
+	// A packet that is sent must be complete. gopacket replaces a Total Length of 0 with the length of the data, so
+	// the field is compared with the header bytes too.
+	if !quoted && (len(ip.Payload) != int(ip.Length)-int(ip.IHL)*4 || binary.BigEndian.Uint16(ip.Contents[2:4]) != ip.Length) {
+		return nil, fmt.Errorf("%w: IPv4 Total Length %d does not match the packet", ErrInvalidPacket, ip.Length)
+	}
+
 	// Verify that src and dst are both unicast
 	if !ip.SrcIP.IsGlobalUnicast() {
 		return nil, fmt.Errorf("%w: IPv4 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
 	}
 
 	if !ip.DstIP.IsGlobalUnicast() {
-		return nil, fmt.Errorf("%w: IPv4 destination %s is not unicast", ErrUnsupportedDestIP, ip.DstIP)
+		return nil, fmt.Errorf("%w: IPv4 destination %s is not unicast", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	// RFC 6052 Section 3.1: non-global addresses must not be embedded in the Well-Known Prefix.
@@ -53,7 +68,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 	}
 
 	if t.isForbiddenIPv4(ip.DstIP) {
-		return nil, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDestIP, ip.DstIP)
+		return nil, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	// IPv6 extension headers have no IPv4 equivalent. Forwarding their protocol numbers would make the receiver
@@ -64,14 +79,8 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 	}
 
 	// ===
-	// Header & checksum validation
+	// Checksum validation
 	// ===
-
-	// RFC 791 Section 3.1 defines a 20-byte minimum IPv4 header and requires
-	// Total Length to include that header; reject packets that cannot be parsed.
-	if ip.Version != 4 || ip.IHL < 5 || len(ip.Contents) < int(ip.IHL)*4 || ip.Length < uint16(ip.IHL)*4 {
-		return nil, fmt.Errorf("%w: invalid IPv4 header", ErrInvalidPacket)
-	}
 
 	fragmented := ip.Flags&layers.IPv4MoreFragments != 0 || ip.FragOffset != 0
 
@@ -86,12 +95,22 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 			return nil, fmt.Errorf("%w: IPv4 packet length %d exceeds %d bytes", ErrPacketOversized, ip.Length, maxIPv4PacketLength)
 		}
 
-		// Check if TTL would be 0, if so generate an ICMP Time Exceeded message back to the source of the original packet
-		if ip.TTL <= 1 {
-			return nil, withReply(ErrTimeExceeded, t.generateIPv6TimeExceeded(ip))
-		}
-
 		icmpError := ip.Protocol == layers.IPProtocolICMPv4 && ip.FragOffset == 0 && len(ip.Payload) > 0 && isICMPv4ErrorType(ip.Payload[0])
+
+		// RFC 7915 Section 4.1 (MUST): "the translator (as any router) MUST check for zero and send the ICMPv4 'TTL
+		// Exceeded' or ICMPv6 'Hop Limit Exceeded' error."
+		//
+		// The TTL is decremented before the translation, so the error goes back to the sender as ICMPv4.
+		if ip.TTL <= 1 {
+			// RFC 1812 Section 4.3.2.7 (MUST NOT): "An ICMP error message MUST NOT be sent as the result of receiving"
+			//
+			// Of that list, an ICMP error or a fragment other than the first can get here.
+			if icmpError || ip.FragOffset != 0 {
+				return nil, ErrTimeExceeded
+			}
+
+			return nil, withReply(ErrTimeExceeded, t.generateIPv4TimeExceeded(ip))
+		}
 
 		// If any IPv4 options are present in the IPv4 packet, they MUST be
 		// ignored and the packet translated normally; there is no attempt to

@@ -4,9 +4,7 @@ import (
 	"encoding/binary"
 )
 
-/**
- * RFC 7915 Sections 5.2 and 5.3 (ICMPv6 to ICMPv4)
- */
+// RFC 7915 Sections 5.2 and 5.3 (ICMPv6 to ICMPv4)
 
 func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 	if len(payload) < 8 {

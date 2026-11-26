@@ -8,9 +8,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * RFC 7915 Section 5 (Translating from IPv6 to IPv4)
- */
+// RFC 7915 Section 5 (Translating from IPv6 to IPv4)
 
 // TranslateIPv6 translates an IPv6 packet, starting at the IP header, to IPv4. It is like TranslateIPv4 otherwise.
 func (t *Translator) TranslateIPv6(packet []byte) (Packet, error) {
@@ -22,7 +20,8 @@ func (t *Translator) TranslateIPv6(packet []byte) (Packet, error) {
 	return t.translateIPv6(&ip, false)
 }
 
-// TranslateIPv6Layer is like TranslateIPv6, for a packet that is already decoded with gopacket.
+// TranslateIPv6Layer is like TranslateIPv6, for a packet that is already decoded with gopacket. The layer must come
+// from decoding, so that its Contents and Payload match its fields. It is not modified.
 func (t *Translator) TranslateIPv6Layer(ip *layers.IPv6) (Packet, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("%w: no IPv6 layer", ErrInvalidPacket)
@@ -34,17 +33,8 @@ func (t *Translator) TranslateIPv6Layer(ip *layers.IPv6) (Packet, error) {
 // translateIPv6 translates a decoded IPv6 packet to IPv4. quoted is true for the packet inside an ICMPv6 error
 // (RFC 7915 Section 5.3).
 func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error) {
-	// Verify that src and dst are both unicast
-	if !ip.SrcIP.IsGlobalUnicast() {
-		return nil, fmt.Errorf("%w: IPv6 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
-	}
-
-	if !ip.DstIP.IsGlobalUnicast() {
-		return nil, fmt.Errorf("%w: IPv6 destination %s is not unicast", ErrUnsupportedDestIP, ip.DstIP)
-	}
-
 	// ===
-	// Header & checksum validation
+	// Header validation
 	// ===
 
 	// RFC 8200 Section 3 defines a fixed 40-byte IPv6 base header.
@@ -52,18 +42,32 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 		return nil, fmt.Errorf("%w: invalid IPv6 header", ErrInvalidPacket)
 	}
 
-	protocol, payload, offset := ip.NextHeader, ip.Payload, ipv6HeaderLength
+	protocol, payload, offset, end := ip.NextHeader, ip.Payload, ipv6HeaderLength, int(ip.Length)
 	if ip.HopByHop != nil {
 		// gopacket already decoded a leading Hop-by-Hop header as part of the IPv6 layer.
 		protocol, offset = ip.HopByHop.NextHeader, offset+ip.HopByHop.ActualLength
 
 		// gopacket cuts the payload behind the Hop-by-Hop header to the Payload Length, which includes that header.
-		end := int(ip.Length) - ip.HopByHop.ActualLength
+		end -= ip.HopByHop.ActualLength
 		if end < 0 {
 			return nil, fmt.Errorf("%w: IPv6 Payload Length is shorter than the Hop-by-Hop header", ErrInvalidPacket)
 		}
 
 		payload = payload[:min(len(payload), end)]
+	}
+
+	// A packet that is sent must be complete.
+	if !quoted && len(payload) < end {
+		return nil, fmt.Errorf("%w: IPv6 Payload Length %d does not match the packet", ErrInvalidPacket, ip.Length)
+	}
+
+	// Verify that src and dst are both unicast
+	if !ip.SrcIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv6 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
+	}
+
+	if !ip.DstIP.IsGlobalUnicast() {
+		return nil, fmt.Errorf("%w: IPv6 destination %s is not unicast", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 5.1)
@@ -115,12 +119,12 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	}
 
 	if t.isForbiddenIPv6(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s embeds a non-global IPv4 address", ErrUnsupportedDestIP, ip.DstIP)
+		return nil, fmt.Errorf("%w: IPv6 destination %s embeds a non-global IPv4 address", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	// Only the source may fall back to the router address, so the destination must always be mappable.
 	if !t.hasIPv6ToIPv4Mapping(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrUnsupportedDestIP, ip.DstIP)
+		return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	if t.isIllegalIPv4Embedded(ip.SrcIP) {
@@ -128,14 +132,25 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	}
 
 	if t.isIllegalIPv4Embedded(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s embeds an illegal IPv4 address", ErrUnsupportedDestIP, ip.DstIP)
+		return nil, fmt.Errorf("%w: IPv6 destination %s embeds an illegal IPv4 address", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
 	// A quoted packet is not sent, so it only needs to be translated.
 	if !quoted {
-		// Check if the Hop Limit would be 0, if so generate an ICMP Time Exceeded message back to the source of the original packet
+		// RFC 7915 Section 5.1 (MUST): "the translator (as any router) MUST check for zero and send the ICMPv4 'TTL
+		// Exceeded' or ICMPv6 'Hop Limit Exceeded' error."
+		//
+		// The Hop Limit is decremented before the translation, so the error goes back to the sender as ICMPv6.
 		if ip.HopLimit <= 1 {
-			return nil, withReply(ErrTimeExceeded, t.generateIPv4TimeExceeded(ip))
+			// RFC 4443 Section 2.4 (MUST NOT): "An ICMPv6 error message MUST NOT be originated as a result of receiving the
+			// following:"
+			//
+			// Of that list, an ICMPv6 error (e.1) or a Redirect (e.2, type 137) can get here.
+			if protocol == layers.IPProtocolICMPv6 && len(payload) > 0 && (payload[0] < 128 || payload[0] == 137) {
+				return nil, ErrTimeExceeded
+			}
+
+			return nil, withReply(ErrTimeExceeded, t.generateIPv6TimeExceeded(ip))
 		}
 
 		// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the

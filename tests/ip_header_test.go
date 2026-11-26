@@ -341,55 +341,67 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 // RFC 7915 Sections 4.1 and 5.1 (MUST): "the translator (as any router) MUST check for zero and send the ICMPv4 'TTL
 // Exceeded' or ICMPv6 'Hop Limit Exceeded' error."
 //
-// ICMP errors never trigger another ICMP error (RFC 4443 Section 2.4, RFC 1122 Section 3.2.2).
+// The TTL or Hop Limit is decremented before the translation, so the error goes back to the sender in the family of
+// the expired packet and quotes it as received. ICMP errors never trigger another ICMP error (RFC 4443 Section 2.4,
+// RFC 1122 Section 3.2.2), and neither do IPv4 fragments other than the first (RFC 1812 Section 4.3.2.7).
 func TestTranslateExpiredTTL(t *testing.T) {
 	for _, ttl := range []uint8{0, 1} {
 		t.Run(fmt.Sprintf("IPv4 TTL %d", ttl), func(t *testing.T) {
-			result, err := translateIPv4(t, testTranslator(), ipv4TCPPacket(t, ttl))
-			if !errors.Is(err, siit.ErrTimeExceeded) {
-				t.Fatalf("got error %v, want ErrTimeExceeded", err)
-			}
-			if result.reply == nil {
-				t.Fatalf("no Time Exceeded reply was generated: %T", err)
-			}
-			packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv6, gopacket.Default)
-			ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-			if !ok || ip.NextHeader != layers.IPProtocolICMPv6 || !ip.DstIP.Equal(ipv4TranslatedSource) {
-				t.Fatalf("missing generated IPv6 ICMP error to the sender: %v", packet.ErrorLayer())
-			}
-			icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
-			if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(icmpv6TimeExceeded, 0) || icmp.Checksum != recalculatedICMPv6Checksum(t, ip, icmp) {
-				t.Fatalf("invalid generated IPv6 Time Exceeded: %v", packet.ErrorLayer())
-			}
-			quoted, ok := icmpv6ErrorQuote(t, packet).Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-			if !ok || quoted.HopLimit != ttl {
-				t.Fatalf("generated quote has Hop Limit %v, want %d", quoted, ttl)
-			}
-		})
-
-		t.Run(fmt.Sprintf("IPv6 Hop Limit %d", ttl), func(t *testing.T) {
-			result, err := translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, ttl, ipv6Dest, ipv6Source))
-			if !errors.Is(err, siit.ErrTimeExceeded) {
-				t.Fatalf("got error %v, want ErrTimeExceeded", err)
-			}
-			if result.reply == nil {
-				t.Fatalf("no Time Exceeded reply was generated: %T", err)
+			input := ipv4TCPPacket(t, ttl)
+			result, err := translateIPv4(t, testTranslator(), input)
+			if !errors.Is(err, siit.ErrTimeExceeded) || result.reply == nil {
+				t.Fatalf("got error %v and reply length %d, want ErrTimeExceeded with a reply", err, len(result.reply))
 			}
 			packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv4, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-			if !ok || ip.Protocol != layers.IPProtocolICMPv4 || ip.Checksum != ipv4HeaderChecksum(ip) {
-				t.Fatalf("invalid generated IPv4 ICMP error: %v", packet.ErrorLayer())
+			if !ok || ip.Protocol != layers.IPProtocolICMPv4 || ip.Checksum != ipv4HeaderChecksum(ip) || !ip.SrcIP.Equal(ipv4RouterAddress) || !ip.DstIP.Equal(ipv4Source) {
+				t.Fatalf("invalid generated IPv4 ICMP error to the sender: %v", packet.ErrorLayer())
 			}
 			icmp, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 			if !ok || icmp.TypeCode != layers.CreateICMPv4TypeCode(icmpv4TimeExceeded, 0) || icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) {
 				t.Fatalf("invalid generated IPv4 Time Exceeded: %v", packet.ErrorLayer())
 			}
-			quoted, ok := gopacket.NewPacket(icmp.Payload, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-			if !ok || quoted.TTL != ttl {
-				t.Fatalf("generated quote has TTL %v, want %d", quoted, ttl)
+			if !bytes.Equal(icmp.Payload, input.Data()) {
+				t.Fatal("the Time Exceeded does not quote the expired packet as received")
+			}
+		})
+
+		t.Run(fmt.Sprintf("IPv6 Hop Limit %d", ttl), func(t *testing.T) {
+			input := ipv6TCPPacketWithAddresses(t, ttl, ipv6Dest, ipv6Source)
+			result, err := translateIPv6(t, testTranslator(), input)
+			if !errors.Is(err, siit.ErrTimeExceeded) || result.reply == nil {
+				t.Fatalf("got error %v and reply length %d, want ErrTimeExceeded with a reply", err, len(result.reply))
+			}
+			packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv6, gopacket.Default)
+			ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+			if !ok || ip.NextHeader != layers.IPProtocolICMPv6 || !ip.SrcIP.Equal(expectedMappedAddress(ipv4RouterAddress)) || !ip.DstIP.Equal(ipv6Dest) {
+				t.Fatalf("invalid generated IPv6 ICMP error to the sender: %v", packet.ErrorLayer())
+			}
+			icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+			if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(icmpv6TimeExceeded, 0) || icmp.Checksum != recalculatedICMPv6Checksum(t, ip, icmp) {
+				t.Fatalf("invalid generated IPv6 Time Exceeded: %v", packet.ErrorLayer())
+			}
+			if !bytes.Equal(icmp.Payload[icmpErrorRestHeaderSize:], input.Data()) {
+				t.Fatal("the Time Exceeded does not quote the expired packet as received")
 			}
 		})
 	}
+
+	t.Run("IPv4 fragment other than the first", func(t *testing.T) {
+		ip := &layers.IPv4{Version: 4, IHL: 5, TTL: 1, Protocol: layers.IPProtocolTCP, FragOffset: 8, SrcIP: ipv4Source, DstIP: ipv4Dest}
+		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 16))), layers.LayerTypeIPv4, gopacket.Default)
+		result, err := translateIPv4(t, testTranslator(), input)
+		if !errors.Is(err, siit.ErrTimeExceeded) || result.packet != nil || result.reply != nil {
+			t.Fatalf("expired fragment returned err=%v and reply length %d, want ErrTimeExceeded without a reply", err, len(result.reply))
+		}
+	})
+	t.Run("ICMPv6 Redirect", func(t *testing.T) {
+		input := withHopLimit(t, ipv6ICMPPacket(t, 137, 0, make([]byte, 36)), 1)
+		result, err := translateIPv6(t, testTranslator(), input)
+		if !errors.Is(err, siit.ErrTimeExceeded) || result.packet != nil || result.reply != nil {
+			t.Fatalf("expired Redirect returned err=%v and reply length %d, want ErrTimeExceeded without a reply", err, len(result.reply))
+		}
+	})
 
 	// Other transport protocols expire like TCP; an expiring ICMP error is dropped without any reply.
 	for _, test := range []struct {
@@ -505,8 +517,8 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/destination %s", name, address), func(t *testing.T) {
 				packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, global), embed(prefix, address))
 				result, err := translateIPv6(t, setup.translator, packet)
-				if !errors.Is(err, siit.ErrUnsupportedDestIP) || result.packet != nil {
-					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedDestIP", err, len(result.packet))
+				if !errors.Is(err, siit.ErrUnsupportedDstIP) || result.packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedDstIP", err, len(result.packet))
 				}
 			})
 		}

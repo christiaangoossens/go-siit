@@ -6,9 +6,7 @@ import (
 	"net/netip"
 )
 
-/**
- * RFC 6052 (IPv6 Addressing of IPv4/IPv6 Translators)
- */
+// RFC 6052 (IPv6 Addressing of IPv4/IPv6 Translators)
 
 func isRFC6052PrefixLength(bits int) bool {
 	return bits == 96 || (bits >= 32 && bits <= 64 && bits%8 == 0)
@@ -136,9 +134,7 @@ func (t *Translator) isIllegalIPv4Embedded(ipv6 net.IP) bool {
 	return !mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6).IsGlobalUnicast()
 }
 
-/**
- * General mapping functions
- */
+// General mapping functions
 
 func (t *Translator) mapIPv4ToIPv6(ipv4 net.IP) net.IP {
 	// Check if already present in table

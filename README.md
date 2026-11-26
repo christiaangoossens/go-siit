@@ -9,7 +9,7 @@ It also implements:
 ## Assumptions
 
 - The kernel handles routing, MTU enforcement, and packet fragmentation.
-- `Translator` receives does not receive oversized packets. Fragmentation is already preformed if necessary.
+- `Translator` does not receive oversized packets. Fragmentation is already performed if necessary.
 - `Translator` does not perform MTU-driven fragmentation.
 - We only support unicast packets.
 - We only support internet routable packets (not LAN-internal, such as discovery protocols).
@@ -25,12 +25,14 @@ The library exposes an object called `Translator` which you can create using `Ne
 
 ```go
 translator, err := siit.NewTranslator(siit.Config{
-	NAT64Prefix:       netip.MustParsePrefix("64:ff9b::/96"), // RFC 6052
-	IPv4RouterAddress: netip.MustParseAddr("192.0.2.1"),     // source of ICMPv4 errors from untranslatable IPv6 sources
-	EAMTable:          nil,                                  // RFC 7757, may be empty; ParseEAMEntry parses the text form
-	MTU:               0,                                    // IPv6 path MTU, 0 means 1280
+	NAT64Prefix:       netip.MustParsePrefix("2001:db8:64::/96"), // RFC 6052
+	IPv4RouterAddress: netip.MustParseAddr("192.0.2.1"),         // source of the ICMP errors the translator generates
+	EAMTable:          nil,                                      // RFC 7757, may be empty; ParseEAMEntry parses the text form
+	MTU:               0,                                        // IPv6 path MTU, 0 means 1280
 })
 ```
+
+The router address must be a unicast address. Generated ICMPv6 errors come from the router address mapped to IPv6, so with the Well-Known Prefix `64:ff9b::/96` a non-global router address such as `192.0.0.254` needs an EAM entry (RFC 6052 Section 3.1).
 
 The translator is immutable and safe for concurrent use.
 
@@ -47,13 +49,13 @@ TranslateIPv6Layer(ip *layers.IPv6) (Packet, error)
 
 `Packet` is the translated packet as bytes, with `Src()`, `Dst()` and `Version()` read from its header and `Decode()` for a lazy gopacket view. It is empty when the packet is dropped (`nil` error) or rejected (an error wrapping one of the `Err` values).
 
-When the translator answers a rejected packet with an ICMP error, the error is a `*TranslationError` whose `Reply` must be sent back out on the side that `Reply.Version()` names:
+When the translator answers a rejected packet with an ICMP error, the error is a `*TranslationError` whose `Reply` goes back to the sender, out the side the packet came from:
 
 ```go
 result, err := translator.TranslateIPv4(buffer[:n])
 var translationErr *siit.TranslationError
 if errors.As(err, &translationErr) {
-	send(translationErr.Reply)
+	writeToIPv4(translationErr.Reply) // back out the side the packet came from
 }
 if len(result) > 0 {
 	writeToIPv6(result)

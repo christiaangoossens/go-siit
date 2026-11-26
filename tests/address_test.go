@@ -207,6 +207,9 @@ func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 		return config
 	}
 	withTable := func(table rawEAMTable) siit.Config { return testConfig("64:ff9b::/96", table) }
+	eamEntry := func(ipv4Prefix, ipv6Prefix string) siit.EAMEntry {
+		return siit.EAMEntry{IPv4Prefix: netip.MustParsePrefix(ipv4Prefix), IPv6Prefix: netip.MustParsePrefix(ipv6Prefix)}
+	}
 	withEntry := func(entry siit.EAMEntry) siit.Config {
 		config := testConfig("64:ff9b::/96", nil)
 		config.EAMTable = siit.EAMTable{entry}
@@ -225,10 +228,10 @@ func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 		{"IPv6 router", withRouter(netip.MustParseAddr("2001:db8::1"))},
 		{"duplicate IPv4 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:2::/56"}})},
 		{"duplicate IPv6 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1::/56"}})},
-		{"IPv4 suffix longer than IPv6 suffix", withTable(rawEAMTable{{IPv4Prefix: "10.0.0.0/8", IPv6Prefix: "2001:db8::/120"}})},
-		{"IPv6 prefix in IPv4 column", withTable(rawEAMTable{{IPv4Prefix: "2001:db8::1", IPv6Prefix: "2001:db8::2"}})},
-		{"IPv4 prefix in IPv6 column", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "192.0.2.2"}})},
-		{"IPv4-mapped IPv6 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "::ffff:192.0.2.1"}})},
+		{"IPv4 suffix longer than IPv6 suffix", withEntry(eamEntry("10.0.0.0/8", "2001:db8::/120"))},
+		{"IPv6 prefix in IPv4 column", withEntry(eamEntry("2001:db8::1/128", "2001:db8::2/128"))},
+		{"IPv4 prefix in IPv6 column", withEntry(eamEntry("192.0.2.1/32", "192.0.2.2/32"))},
+		{"IPv4-mapped IPv6 prefix", withEntry(eamEntry("192.0.2.1/32", "::ffff:192.0.2.1/128"))},
 		{"empty entry", withEntry(siit.EAMEntry{})},
 	}
 	for _, test := range tests {
@@ -243,8 +246,11 @@ func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 			t.Fatalf("EAM with identical suffix lengths was rejected: %v", err)
 		}
 	})
-	t.Run("unparsable EAM entries", func(t *testing.T) {
-		for _, entry := range [][2]string{{"192.0.2.1/33", "2001:db8::1"}, {"192.0.2.1", "2001:db8::1/129"}, {"not-an-address", "2001:db8::1"}, {"", ""}} {
+	t.Run("invalid EAM entries in text form", func(t *testing.T) {
+		for _, entry := range [][2]string{
+			{"192.0.2.1/33", "2001:db8::1"}, {"192.0.2.1", "2001:db8::1/129"}, {"not-an-address", "2001:db8::1"}, {"", ""},
+			{"10.0.0.0/8", "2001:db8::/120"}, {"2001:db8::1", "2001:db8::2"}, {"192.0.2.1", "192.0.2.2"}, {"192.0.2.1", "::ffff:192.0.2.1"},
+		} {
 			if _, err := siit.ParseEAMEntry(entry[0], entry[1]); !errors.Is(err, siit.ErrInvalidConfig) {
 				t.Fatalf("ParseEAMEntry(%q, %q) returned %v, want ErrInvalidConfig", entry[0], entry[1], err)
 			}

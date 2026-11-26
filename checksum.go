@@ -9,9 +9,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * Internet checksum (RFC 1071, RFC 1624)
- */
+// Internet checksum (RFC 1071, RFC 1624)
 
 type transportChecksum struct{ headerLength, checksumOffset int }
 

@@ -368,15 +368,15 @@ func TestTranslateICMPErrorIsTruncatedToMinimumSizes(t *testing.T) {
 	t.Run("generated Time Exceeded for IPv4", func(t *testing.T) {
 		packet := withTTL(t, ipv4TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200), nil), 1)
 		result, err := translateIPv4(t, testTranslator(), packet)
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != maxIPv6PacketLength {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.reply), err, maxIPv6PacketLength)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != 576 {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.reply), err)
 		}
 	})
 	t.Run("generated Time Exceeded for IPv6", func(t *testing.T) {
 		packet := withHopLimit(t, ipv6TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200)), 1)
 		result, err := translateIPv6(t, testTranslator(), packet)
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != 576 {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.reply), err)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != maxIPv6PacketLength {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.reply), err, maxIPv6PacketLength)
 		}
 	})
 }
@@ -540,17 +540,4 @@ func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 			t.Fatalf("ICMPv6 query from an unmappable source was translated: err=%v", err)
 		}
 	})
-}
-
-// The Time Exceeded message generated for an expired IPv4 packet (RFC 7915 Section 4.1) is addressed to the
-// translated sender, so translating it back produces a deliverable ICMPv4 Time Exceeded.
-func TestGeneratedTimeExceededCanBeTranslatedBack(t *testing.T) {
-	generated, err := translateIPv4(t, testTranslator(), ipv4TCPPacket(t, 1))
-	if !errors.Is(err, siit.ErrTimeExceeded) || generated.reply == nil {
-		t.Fatalf("expired packet did not generate Time Exceeded: err=%v", err)
-	}
-	result := translateToICMPv4(t, testTranslator(), gopacket.NewPacket(generated.reply, layers.LayerTypeIPv6, gopacket.Default))
-	if !result.ip.DstIP.Equal(ipv4Source) || !result.ip.SrcIP.Equal(ipv4RouterAddress) || result.icmp.TypeCode != layers.CreateICMPv4TypeCode(icmpv4TimeExceeded, 0) {
-		t.Fatalf("generated Time Exceeded was not translated into a deliverable ICMPv4 error: %v", result.packet.ErrorLayer())
-	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -167,7 +168,16 @@ func translateIPv4(t *testing.T, translator *siit.Translator, packet gopacket.Pa
 	requireUnchanged(t, data, packet.Data())
 
 	layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	var before layers.IPv4
+	if layer != nil {
+		before = *layer
+	}
 	layerResult, layerErr := translator.TranslateIPv4Layer(layer)
+	requireUnchanged(t, data, packet.Data())
+	if layer != nil && !reflect.DeepEqual(before, *layer) {
+		t.Fatal("the translator modified the IPv4 layer")
+	}
+
 	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
 	return newTranslation(result, err), err
 }
@@ -179,7 +189,16 @@ func translateIPv6(t *testing.T, translator *siit.Translator, packet gopacket.Pa
 	requireUnchanged(t, data, packet.Data())
 
 	layer, _ := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	var before layers.IPv6
+	if layer != nil {
+		before = *layer
+	}
 	layerResult, layerErr := translator.TranslateIPv6Layer(layer)
+	requireUnchanged(t, data, packet.Data())
+	if layer != nil && !reflect.DeepEqual(before, *layer) {
+		t.Fatal("the translator modified the IPv6 layer")
+	}
+
 	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
 	return newTranslation(result, err), err
 }
@@ -205,10 +224,35 @@ func requireUnchanged(t *testing.T, input, original []byte) {
 // unfragmented IPv4 packet is generated per packet, so it and the header checksum are left out.
 func requireSameTranslation(t *testing.T, fromBytes translation, bytesErr error, fromLayer translation, layerErr error) {
 	t.Helper()
-	sameErr := (bytesErr == nil) == (layerErr == nil)
+	sameErr := rejectionReason(t, bytesErr) == rejectionReason(t, layerErr)
 	if !sameErr || !bytes.Equal(withoutIdentification(fromBytes.packet), withoutIdentification(fromLayer.packet)) || !bytes.Equal(fromBytes.reply, fromLayer.reply) {
 		t.Fatalf("bytes and layer translations differ: err=%v and err=%v", bytesErr, layerErr)
 	}
+}
+
+var rejectionSentinels = []error{
+	siit.ErrInvalidPacket, siit.ErrInvalidICMP, siit.ErrUnsupportedProtocol, siit.ErrTimeExceeded,
+	siit.ErrSourceRouteFailed, siit.ErrUnsupportedSrcIP, siit.ErrUnsupportedDstIP, siit.ErrPacketOversized,
+	siit.ErrZeroUDPChecksum,
+}
+
+// rejectionReason returns the sentinel that err wraps, nil for a nil error. A rejection must wrap exactly one.
+func rejectionReason(t *testing.T, err error) error {
+	t.Helper()
+	if err == nil {
+		return nil
+	}
+
+	var reasons []error
+	for _, sentinel := range rejectionSentinels {
+		if errors.Is(err, sentinel) {
+			reasons = append(reasons, sentinel)
+		}
+	}
+	if len(reasons) != 1 {
+		t.Fatalf("error %q wraps %d sentinels, want 1", err, len(reasons))
+	}
+	return reasons[0]
 }
 
 func withoutIdentification(packet []byte) []byte {
@@ -452,13 +496,6 @@ func translatorWithMTU(t *testing.T, mtu uint32) *siit.Translator {
 }
 
 // ipv4EchoRequest builds an ICMPv4 Echo Request travelling from ipv4Source to ipv4Dest.
-func ipv4EchoRequest(t *testing.T, payload []byte) gopacket.Packet {
-	t.Helper()
-	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(echoRequest, 0)}
-	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
-}
-
 // Transport kinds understood by ipv4Segment and ipv6Segment.
 const (
 	segmentTCP  = "TCP"

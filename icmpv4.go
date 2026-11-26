@@ -6,9 +6,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * RFC 7915 Sections 4.2 and 4.3 (ICMPv4 to ICMPv6)
- */
+// RFC 7915 Sections 4.2 and 4.3 (ICMPv4 to ICMPv6)
 
 // RFC 1191 Table 7-1: the MTU plateaus used when a router reports no next-hop MTU.
 var mtuPlateaus = []uint32{65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68}
