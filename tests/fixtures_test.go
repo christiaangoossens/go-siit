@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"slices"
 	"testing"
 
@@ -58,35 +59,53 @@ const (
 	icmpv6DestUnreachable   = 1
 )
 
-func translatorWithPrefix(t *testing.T, prefix string, eamTable siit.RawEAMTable) *siit.Translator {
-	t.Helper()
-	_, nat64Net, err := net.ParseCIDR(prefix)
-	if err != nil {
-		t.Fatal(err)
+// rawEAMTable is an EAM table in text form, parsed with siit.ParseEAMEntry.
+type rawEAMTable []struct{ IPv4Prefix, IPv6Prefix string }
+
+func (table rawEAMTable) parse() (siit.EAMTable, error) {
+	var parsed siit.EAMTable
+	for _, entry := range table {
+		eam, err := siit.ParseEAMEntry(entry.IPv4Prefix, entry.IPv6Prefix)
+		if err != nil {
+			return nil, err
+		}
+		parsed = append(parsed, eam)
 	}
-	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
+	return parsed, nil
+}
+
+// testConfig returns the configuration of the test translators: the router address and the given prefix and table.
+func testConfig(prefix string, eamTable rawEAMTable) siit.Config {
+	table, err := eamTable.parse()
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
+	}
+	return siit.Config{
+		NAT64Prefix:       netip.MustParsePrefix(prefix),
+		IPv4RouterAddress: netip.AddrFrom4([4]byte(ipv4RouterAddress.To4())),
+		EAMTable:          table,
+	}
+}
+
+func newTestTranslator(config siit.Config) *siit.Translator {
+	translator, err := siit.NewTranslator(config)
+	if err != nil {
+		panic(err)
 	}
 	return translator
+}
+
+func translatorWithPrefix(t *testing.T, prefix string, eamTable rawEAMTable) *siit.Translator {
+	t.Helper()
+	return newTestTranslator(testConfig(prefix, eamTable))
 }
 
 func testTranslator() *siit.Translator {
 	return testTranslatorWithEAM(nil)
 }
 
-func testTranslatorWithEAM(eamTable siit.RawEAMTable) *siit.Translator {
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		panic(err)
-	}
-
-	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
-	if err != nil {
-		panic(err)
-	}
-
-	return translator
+func testTranslatorWithEAM(eamTable rawEAMTable) *siit.Translator {
+	return newTestTranslator(testConfig("64:ff9b::/96", eamTable))
 }
 
 func expectedMappedAddress(address net.IP) net.IP {
@@ -427,15 +446,9 @@ func tcpSegment(t *testing.T, network gopacket.NetworkLayer, payload []byte) []b
 
 func translatorWithMTU(t *testing.T, mtu uint32) *siit.Translator {
 	t.Helper()
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		t.Fatal(err)
-	}
-	translator, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, mtu)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return translator
+	config := testConfig("64:ff9b::/96", nil)
+	config.MTU = mtu
+	return newTestTranslator(config)
 }
 
 // ipv4EchoRequest builds an ICMPv4 Echo Request travelling from ipv4Source to ipv4Dest.

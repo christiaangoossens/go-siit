@@ -18,7 +18,7 @@ var (
 	// Two hosts with an Explicit Address Mapping, so that the translated pseudo-header differs from the Well-Known Prefix one.
 	eamHost1 = net.ParseIP("2001:db8::10")
 	eamHost2 = net.ParseIP("2001:db8::20")
-	eamTable = siit.RawEAMTable{
+	eamTable = rawEAMTable{
 		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
 		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
 	}

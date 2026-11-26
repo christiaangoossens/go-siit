@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -203,18 +202,20 @@ func TestTranslateEnforcesMTU(t *testing.T) {
 	}
 }
 
-// Local configuration contract (README): an MTU below the IPv6 minimum of 1280 is rejected at creation.
-func TestNewTranslatorWithMTURejectsValuesBelowIPv6Minimum(t *testing.T) {
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, mtu := range []uint32{0, 68, 1279} {
-		if _, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, mtu); !errors.Is(err, siit.ErrInvalidMTU) {
+// Local configuration contract (README): an MTU below the IPv6 minimum of 1280 is rejected at creation, and zero
+// means 1280.
+func TestNewTranslatorRejectsMTUBelowIPv6Minimum(t *testing.T) {
+	config := testConfig("64:ff9b::/96", nil)
+	for _, mtu := range []uint32{1, 68, 1279} {
+		config.MTU = mtu
+		if _, err := siit.NewTranslator(config); !errors.Is(err, siit.ErrInvalidMTU) {
 			t.Fatalf("MTU %d: got error %v, want ErrInvalidMTU", mtu, err)
 		}
 	}
-	if _, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, 1280); err != nil {
-		t.Fatalf("the IPv6 minimum MTU was rejected: %v", err)
+	for _, mtu := range []uint32{0, 1280} {
+		config.MTU = mtu
+		if _, err := siit.NewTranslator(config); err != nil {
+			t.Fatalf("MTU %d was rejected: %v", mtu, err)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package siit
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -10,14 +11,45 @@ import (
  * RFC 7757 (EAMT)
  */
 
-// EAMEntry describes one explicit IPv4-to-IPv6 address input mapping.
-type RawEAMEntry struct {
-	IPv4Prefix string
-	IPv6Prefix string
+// EAMEntry maps an IPv4 prefix to an IPv6 prefix. A single address is a prefix of 32 or 128 bits.
+type EAMEntry struct {
+	IPv4Prefix netip.Prefix
+	IPv6Prefix netip.Prefix
 }
 
-// EAMTable is a collection of explicit address mappings.
-type RawEAMTable []RawEAMEntry
+// EAMTable is a collection of explicit address mappings. The longest matching prefix wins.
+type EAMTable []EAMEntry
+
+// ParseEAMEntry parses an entry from its text form, like ParseEAMEntry("192.0.2.0/24", "2001:db8::/120").
+//
+// RFC 7757 Section 3.2 (MUST): "The prefix length MAY be omitted, in which case the implementation MUST assume it to
+// be 32 for IPv4 and 128 for IPv6."
+func ParseEAMEntry(ipv4Prefix, ipv6Prefix string) (EAMEntry, error) {
+	ipv4, err := parseEAMPrefix(ipv4Prefix)
+	if err != nil {
+		return EAMEntry{}, fmt.Errorf("%w: invalid EAM IPv4 prefix %q", ErrInvalidConfig, ipv4Prefix)
+	}
+
+	ipv6, err := parseEAMPrefix(ipv6Prefix)
+	if err != nil {
+		return EAMEntry{}, fmt.Errorf("%w: invalid EAM IPv6 prefix %q", ErrInvalidConfig, ipv6Prefix)
+	}
+
+	return EAMEntry{IPv4Prefix: ipv4, IPv6Prefix: ipv6}, nil
+}
+
+func parseEAMPrefix(prefix string) (netip.Prefix, error) {
+	if strings.Contains(prefix, "/") {
+		return netip.ParsePrefix(prefix)
+	}
+
+	address, err := netip.ParseAddr(prefix)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+
+	return netip.PrefixFrom(address, address.BitLen()), nil
+}
 
 type eamMapping struct {
 	ipv4     net.IP
@@ -37,21 +69,19 @@ type eamLookup struct {
 }
 
 // Constructs the EAM lookup tree from the given table. Returns an error if the table is invalid.
-func newEAMLookup(table RawEAMTable) (*eamLookup, error) {
+func newEAMLookup(table EAMTable) (*eamLookup, error) {
 	lookup := &eamLookup{ipv4Root: &eamNode{}, ipv6Root: &eamNode{}}
 	for index, entry := range table {
-		ipv4, ipv4Net, err := parseEAMPrefix(entry.IPv4Prefix, net.IPv4len*8)
-		if err != nil || ipv4.To4() == nil {
-			return nil, fmt.Errorf("invalid EAM IPv4 prefix at index %d: %q", index, entry.IPv4Prefix)
+		ipv4Prefix, ipv6Prefix := entry.IPv4Prefix.Masked(), entry.IPv6Prefix.Masked()
+		if !ipv4Prefix.IsValid() || !ipv4Prefix.Addr().Is4() {
+			return nil, fmt.Errorf("invalid EAM IPv4 prefix at index %d: %v", index, entry.IPv4Prefix)
 		}
 
-		ipv6, ipv6Net, err := parseEAMPrefix(entry.IPv6Prefix, net.IPv6len*8)
-		if err != nil || ipv6.To4() != nil {
-			return nil, fmt.Errorf("invalid EAM IPv6 prefix at index %d: %q", index, entry.IPv6Prefix)
+		if !ipv6Prefix.IsValid() || !ipv6Prefix.Addr().Is6() || ipv6Prefix.Addr().Is4In6() {
+			return nil, fmt.Errorf("invalid EAM IPv6 prefix at index %d: %v", index, entry.IPv6Prefix)
 		}
 
-		ipv4Bits, _ := ipv4Net.Mask.Size()
-		ipv6Bits, _ := ipv6Net.Mask.Size()
+		ipv4Bits, ipv6Bits := ipv4Prefix.Bits(), ipv6Prefix.Bits()
 
 		// RFC 7757 Section 3.2 requires the IPv4 prefix to have no more
 		// suffix bits than its corresponding IPv6 prefix. This leaves room
@@ -60,7 +90,8 @@ func newEAMLookup(table RawEAMTable) (*eamLookup, error) {
 			return nil, fmt.Errorf("EAM entry at index %d cannot carry its IPv4 suffix", index)
 		}
 
-		mapping := &eamMapping{ipv4: ipv4Net.IP.To4(), ipv6: ipv6Net.IP.To16(), ipv4Bits: ipv4Bits, ipv6Bits: ipv6Bits}
+		ipv4, ipv6 := net.IP(ipv4Prefix.Addr().AsSlice()), net.IP(ipv6Prefix.Addr().AsSlice())
+		mapping := &eamMapping{ipv4: ipv4, ipv6: ipv6, ipv4Bits: ipv4Bits, ipv6Bits: ipv6Bits}
 		if err := insertEAMMapping(lookup.ipv4Root, mapping.ipv4, mapping.ipv4Bits, mapping); err != nil {
 			return nil, err
 		}
@@ -70,14 +101,6 @@ func newEAMLookup(table RawEAMTable) (*eamLookup, error) {
 	}
 
 	return lookup, nil
-}
-
-func parseEAMPrefix(prefix string, addressBits int) (net.IP, *net.IPNet, error) {
-	if !strings.Contains(prefix, "/") {
-		prefix += fmt.Sprintf("/%d", addressBits)
-	}
-
-	return net.ParseCIDR(prefix)
 }
 
 // Inserts a mapping into the EAM lookup tree. Returns an error if the mapping already exists.

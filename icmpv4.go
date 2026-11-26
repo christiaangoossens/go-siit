@@ -90,7 +90,7 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 					}
 				}
 			}
-			mtu = min(mtu+ipv4HeaderLength, t.MTU)
+			mtu = min(mtu+ipv4HeaderLength, t.mtu)
 			if mtu < ipv6MinimumMTU {
 				// When translating, set the minimum to the IPv6 minimum.
 				mtu = ipv6MinimumMTU

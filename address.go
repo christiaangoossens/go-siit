@@ -3,6 +3,7 @@ package siit
 import (
 	"fmt"
 	"net"
+	"net/netip"
 )
 
 /**
@@ -44,23 +45,21 @@ func isWellKnownPrefix(prefix *net.IPNet) bool {
 	return ones == 96 && prefix.IP.Equal(wellKnownPrefix)
 }
 
-func validateRFC6052Prefix(prefix *net.IPNet) error {
-	if prefix == nil || prefix.Mask == nil {
-		return fmt.Errorf("Invalid NAT64 prefix: %v", prefix)
+// validateRFC6052Prefix returns the prefix, with its host bits cleared, as the network the translator works with.
+func validateRFC6052Prefix(prefix netip.Prefix) (*net.IPNet, error) {
+	if !prefix.IsValid() || !prefix.Addr().Is6() || prefix.Addr().Is4In6() || !isRFC6052PrefixLength(prefix.Bits()) {
+		return nil, fmt.Errorf("NAT64 prefix must be an IPv6 /32, /40, /48, /56, /64, or /96 prefix, got: %v", prefix)
 	}
 
-	maskSize, maskBits := prefix.Mask.Size()
-	if maskBits != net.IPv6len*8 || !isRFC6052PrefixLength(maskSize) || prefix.IP.To4() != nil {
-		return fmt.Errorf("NAT64 prefix must be an IPv6 /32, /40, /48, /56, /64, or /96 prefix, got: %v", prefix)
-	}
+	prefix = prefix.Masked()
 
 	// RFC 6052 Section 2.2: bits 64-71 (the "u" octet) MUST be zero. Shorter prefixes never reach them, but a /96
 	// prefix contains them, so the administrator has to configure them as zero.
-	if prefix.IP.To16()[8] != 0 {
-		return fmt.Errorf("NAT64 prefix must have a zero u octet (bits 64-71), got: %v", prefix)
+	if prefix.Addr().As16()[8] != 0 {
+		return nil, fmt.Errorf("NAT64 prefix must have a zero u octet (bits 64-71), got: %v", prefix)
 	}
 
-	return nil
+	return &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(prefix.Bits(), net.IPv6len*8)}, nil
 }
 
 func mapIPv4ToIPv6RFC6052(prefix *net.IPNet, ipv4 net.IP) net.IP {

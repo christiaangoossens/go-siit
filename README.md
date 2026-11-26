@@ -17,13 +17,22 @@ It also implements:
 
 The minimum link IPv6 MTU is 1280 bytes. For an unfragmented IPv4 packet, the maximum total IPv4 size is calculated as `MTU - 40 + 20`, so 1260 bytes is accepted. An already fragmented IPv4 packet additionally needs an 8-byte IPv6 Fragment header, so its maximum total IPv4 size is `MTU - 40 - 8 + 20`, or 1252 bytes (1232 bytes of IPv4 payload after the IPv4 header).
 
-The MTU defaults to 1280. An administrator who knows the IPv6 side supports a larger MTU can use `NewTranslatorWithMTU` (or set `Translator.MTU`); the caller must then also configure its tun interface to that MTU. The translator never fragments: a packet that does not fit within the configured MTU is rejected with `ErrPacketOversized`, and an MTU below 1280 is rejected at creation with `ErrInvalidMTU`.
+The MTU defaults to 1280. An administrator who knows the IPv6 side supports a larger MTU can set `Config.MTU`; the caller must then also configure its tun interface to that MTU. The translator never fragments: a packet that does not fit within the configured MTU is rejected with `ErrPacketOversized`, and an MTU below 1280 is rejected at creation with `ErrInvalidMTU`.
 
 ## Usage
 
-The library exposes an object called `Translator` which you can create using `NewTranslator(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTable RawEAMTable) (*Translator, error)`. Use `NewTranslatorWithMTU` when the path MTU is known at creation time.
+The library exposes an object called `Translator` which you can create using `NewTranslator(config Config) (*Translator, error)`:
 
-You should supply a NAT64 net (for RFC 6052), an IPv4 router address (when ICMP packets cannot have their source translated) and an EAM table (which may be empty for pure RFC 6052).
+```go
+translator, err := siit.NewTranslator(siit.Config{
+	NAT64Prefix:       netip.MustParsePrefix("64:ff9b::/96"), // RFC 6052
+	IPv4RouterAddress: netip.MustParseAddr("192.0.2.1"),     // source of ICMPv4 errors from untranslatable IPv6 sources
+	EAMTable:          nil,                                  // RFC 7757, may be empty; ParseEAMEntry parses the text form
+	MTU:               0,                                    // IPv6 path MTU, 0 means 1280
+})
+```
+
+The translator is immutable and safe for concurrent use.
 
 Then, you can use the following functions on `Translator` to translate packets, starting at the IP header:
 

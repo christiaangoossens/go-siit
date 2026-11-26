@@ -1,8 +1,10 @@
 package siit_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -194,48 +196,58 @@ func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 // The allowed prefix lengths are listed in RFC 6052 Section 2.2. The other rows (router address, duplicate or
 // malformed EAM entries) are local configuration checks.
 func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
-	parse := func(prefix string) *net.IPNet {
-		_, network, err := net.ParseCIDR(prefix)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return network
+	withPrefix := func(prefix netip.Prefix) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.NAT64Prefix = prefix
+		return config
 	}
-	wellKnown := parse("64:ff9b::/96")
+	withRouter := func(router netip.Addr) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.IPv4RouterAddress = router
+		return config
+	}
+	withTable := func(table rawEAMTable) siit.Config { return testConfig("64:ff9b::/96", table) }
+	withEntry := func(entry siit.EAMEntry) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.EAMTable = siit.EAMTable{entry}
+		return config
+	}
 	tests := []struct {
 		name   string
-		prefix *net.IPNet
-		router net.IP
-		table  siit.RawEAMTable
+		config siit.Config
 	}{
-		{"nil prefix", nil, ipv4RouterAddress, nil},
-		{"prefix length 80", parse("64:ff9b::/80"), ipv4RouterAddress, nil},
-		{"prefix length 128", parse("64:ff9b::1/128"), ipv4RouterAddress, nil},
-		{"/96 prefix with a non-zero u octet", parse("2001:db8:122:344:ff00::/96"), ipv4RouterAddress, nil},
-		{"nil router", wellKnown, nil, nil},
-		{"IPv6 router", wellKnown, net.ParseIP("2001:db8::1"), nil},
-		{"duplicate IPv4 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:2::/56"}}},
-		{"duplicate IPv6 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1::/56"}}},
-		{"IPv4 suffix longer than IPv6 suffix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "10.0.0.0/8", IPv6Prefix: "2001:db8::/120"}}},
-		{"IPv6 prefix in IPv4 column", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "2001:db8::1", IPv6Prefix: "2001:db8::2"}}},
-		{"IPv4 prefix in IPv6 column", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "192.0.2.2"}}},
-		{"IPv4-mapped IPv6 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "::ffff:192.0.2.1"}}},
-		{"IPv4 prefix length too long", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1/33", IPv6Prefix: "2001:db8::1"}}},
-		{"IPv6 prefix length too long", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1/129"}}},
-		{"unparsable IPv4 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "not-an-address", IPv6Prefix: "2001:db8::1"}}},
-		{"empty entry", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{}}},
+		{"no prefix", withPrefix(netip.Prefix{})},
+		{"prefix length 80", withPrefix(netip.MustParsePrefix("64:ff9b::/80"))},
+		{"prefix length 128", withPrefix(netip.MustParsePrefix("64:ff9b::1/128"))},
+		{"IPv4 prefix", withPrefix(netip.MustParsePrefix("192.0.2.0/24"))},
+		{"/96 prefix with a non-zero u octet", withPrefix(netip.MustParsePrefix("2001:db8:122:344:ff00::/96"))},
+		{"no router", withRouter(netip.Addr{})},
+		{"IPv6 router", withRouter(netip.MustParseAddr("2001:db8::1"))},
+		{"duplicate IPv4 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:2::/56"}})},
+		{"duplicate IPv6 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1::/56"}})},
+		{"IPv4 suffix longer than IPv6 suffix", withTable(rawEAMTable{{IPv4Prefix: "10.0.0.0/8", IPv6Prefix: "2001:db8::/120"}})},
+		{"IPv6 prefix in IPv4 column", withTable(rawEAMTable{{IPv4Prefix: "2001:db8::1", IPv6Prefix: "2001:db8::2"}})},
+		{"IPv4 prefix in IPv6 column", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "192.0.2.2"}})},
+		{"IPv4-mapped IPv6 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "::ffff:192.0.2.1"}})},
+		{"empty entry", withEntry(siit.EAMEntry{})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := siit.NewTranslator(test.prefix, test.router, test.table); err == nil {
-				t.Fatal("invalid configuration was accepted")
+			if _, err := siit.NewTranslator(test.config); !errors.Is(err, siit.ErrInvalidConfig) {
+				t.Fatalf("got %v, want ErrInvalidConfig", err)
 			}
 		})
 	}
 	t.Run("equal suffix lengths are valid", func(t *testing.T) {
-		table := siit.RawEAMTable{{IPv4Prefix: "10.0.0.0/24", IPv6Prefix: "2001:db8::/120"}}
-		if _, err := siit.NewTranslator(wellKnown, ipv4RouterAddress, table); err != nil {
+		if _, err := siit.NewTranslator(withTable(rawEAMTable{{IPv4Prefix: "10.0.0.0/24", IPv6Prefix: "2001:db8::/120"}})); err != nil {
 			t.Fatalf("EAM with identical suffix lengths was rejected: %v", err)
+		}
+	})
+	t.Run("unparsable EAM entries", func(t *testing.T) {
+		for _, entry := range [][2]string{{"192.0.2.1/33", "2001:db8::1"}, {"192.0.2.1", "2001:db8::1/129"}, {"not-an-address", "2001:db8::1"}, {"", ""}} {
+			if _, err := siit.ParseEAMEntry(entry[0], entry[1]); !errors.Is(err, siit.ErrInvalidConfig) {
+				t.Fatalf("ParseEAMEntry(%q, %q) returned %v, want ErrInvalidConfig", entry[0], entry[1], err)
+			}
 		}
 	})
 }
@@ -257,12 +269,12 @@ func TestEAMMappings(t *testing.T) {
 	}
 	tests := []struct {
 		name     string
-		table    siit.RawEAMTable
+		table    rawEAMTable
 		mappings []mapping
 	}{
 		{
 			name: "RFC 7757 Figure 1",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8:aaaa::"},
 				{IPv4Prefix: "192.0.2.2/32", IPv6Prefix: "2001:db8:bbbb::b/128"},
 				{IPv4Prefix: "192.0.2.16/28", IPv6Prefix: "2001:db8:cccc::/124"},
@@ -281,14 +293,14 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name:  "prefixes without a length are single hosts",
-			table: siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1"}},
+			table: rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1"}},
 			mappings: []mapping{
 				{"192.0.2.1", "2001:db8::1", bothDirections},
 			},
 		},
 		{
 			name: "mixed prefix lengths",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"},
 				{IPv4Prefix: "198.51.100.129/32", IPv6Prefix: "2001:db8:2::/64"},
 			},
@@ -299,7 +311,7 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name: "more specific IPv4 prefix wins",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"},
 				{IPv4Prefix: "192.0.2.128/25", IPv6Prefix: "2001:db8:2::/64"},
 			},
@@ -310,7 +322,7 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name: "more specific IPv6 prefix wins",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/64"},
 				{IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1:0:8000::/72"},
 			},
@@ -323,14 +335,14 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name:  "IPv6 suffix bits beyond the IPv4 host part are discarded",
-			table: siit.RawEAMTable{{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"}},
+			table: rawEAMTable{{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"}},
 			mappings: []mapping{
 				{"192.0.2.152", "2001:db8:dddd:0:6000:beef::", ipv6ToIPv4Only},
 			},
 		},
 		{
 			name:  "addresses without an entry use the RFC 6052 prefix",
-			table: siit.RawEAMTable{{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"}},
+			table: rawEAMTable{{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"}},
 			mappings: []mapping{
 				{"1.1.1.1", "2001:db8::10", bothDirections},
 				{"2.2.2.2", "64:ff9b::202:202", bothDirections},
@@ -360,7 +372,7 @@ func TestEAMSupportsRFC6052PrefixLengths(t *testing.T) {
 		{"96", "10.20.30.40/32", "2001:db8:1234:5678:9abc:def0::/96", "10.20.30.40", "2001:db8:1234:5678:9abc:def0::"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			translator := testTranslatorWithEAM(siit.RawEAMTable{{IPv4Prefix: test.ipv4Prefix, IPv6Prefix: test.ipv6Prefix}})
+			translator := testTranslatorWithEAM(rawEAMTable{{IPv4Prefix: test.ipv4Prefix, IPv6Prefix: test.ipv6Prefix}})
 			requireAddressMapping(t, translator, net.ParseIP(test.ipv4).To4(), net.ParseIP(test.ipv6), bothDirections)
 		})
 	}

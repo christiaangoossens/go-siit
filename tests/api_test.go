@@ -12,7 +12,7 @@ import (
 var sentinels = []error{
 	siit.ErrInvalidPacket, siit.ErrInvalidICMP, siit.ErrUnsupportedProtocol, siit.ErrTimeExceeded,
 	siit.ErrSourceRouteFailed, siit.ErrUnsupportedSrcIP, siit.ErrUnsupportedDestIP, siit.ErrPacketOversized,
-	siit.ErrInvalidMTU, siit.ErrZeroUDPChecksum,
+	siit.ErrInvalidMTU, siit.ErrInvalidConfig, siit.ErrZeroUDPChecksum,
 }
 
 // A rejected packet wraps exactly one sentinel, so a caller can pick the ICMP error it would send itself. A reply

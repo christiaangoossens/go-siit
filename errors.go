@@ -13,6 +13,7 @@ var (
 	ErrUnsupportedDestIP   = errors.New("Unsupported destination IP address")
 	ErrPacketOversized     = errors.New("Packet is too large to be translated without possible fragmentation")
 	ErrInvalidMTU          = errors.New("MTU is below the IPv6 minimum")
+	ErrInvalidConfig       = errors.New("Invalid translator configuration")
 	ErrZeroUDPChecksum     = errors.New("UDP checksum is zero")
 )
 

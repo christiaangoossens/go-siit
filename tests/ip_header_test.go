@@ -520,7 +520,7 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 	}
 
 	t.Run("explicit address mappings are exempt", func(t *testing.T) {
-		translator := translatorWithPrefix(t, "2001:db8:64::/96", siit.RawEAMTable{{IPv4Prefix: "127.0.0.9/32", IPv6Prefix: "2001:db8:eeee::9/128"}})
+		translator := translatorWithPrefix(t, "2001:db8:64::/96", rawEAMTable{{IPv4Prefix: "127.0.0.9/32", IPv6Prefix: "2001:db8:eeee::9/128"}})
 		packet := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("2001:db8:eeee::9"), embed("2001:db8:64::", global))
 		result, err := translateIPv6(t, translator, packet)
 		if err != nil || result.packet == nil {
