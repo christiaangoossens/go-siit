@@ -20,6 +20,9 @@ type Translator struct {
 	// EAM table (RFC 7757)
 	eamLookup *eamLookup
 
+	// Fragment Identification generator for IPv4 packets without a Fragment Header (RFC 7915 Section 5.1).
+	identifications *identificationGenerator
+
 	// MTU is the IPv6 path MTU used to determine the maximum IPv4 packet size.
 	MTU uint32
 }
@@ -91,6 +94,7 @@ func NewTranslatorWithMTU(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTabl
 		wellKnownPrefix:   isWellKnownPrefix(nat64Net),
 		ipv4RouterAddress: ipv4RouterAddress,
 		eamLookup:         eamLookup,
+		identifications:   newIdentificationGenerator(),
 		MTU:               mtu,
 	}, nil
 }

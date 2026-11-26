@@ -3,8 +3,6 @@ package siit
 import (
 	"encoding/binary"
 	"fmt"
-	"math/rand/v2"
-	"sync/atomic"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -13,14 +11,6 @@ import (
 /**
  * RFC 7915 Section 5 (Translating from IPv6 to IPv4)
  */
-
-// Fragment Identification generator for IPv6-to-IPv4 packets that carry no Fragment Header (RFC 7915 Section 5.1).
-// It starts at a random value, like the per-destination counter of RFC 7739 Section 5.1.
-var nextIdentification = func() *atomic.Uint32 {
-	var counter atomic.Uint32
-	counter.Store(rand.Uint32())
-	return &counter
-}()
 
 // TranslateIPv6 translates an IPv6 packet to IPv4.
 func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides TranslationOverrides) (TranslatedPacket, error) {
@@ -254,7 +244,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 		}
 
 		// RFC 7915 Section 5.1: the Identification of an unfragmented packet comes from a generator at the translator.
-		ipv4.Id = uint16(nextIdentification.Add(1))
+		ipv4.Id = t.identifications.next(ipv4.SrcIP, ipv4.DstIP)
 		ipv4.Length = uint16(ipv4HeaderLength + len(payload))
 	}
 

@@ -425,22 +425,45 @@ func TestTranslateExpiredTTL(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.1: the IPv4 Identification of an unfragmented packet is set according to a
-// Fragment Identification generator at the translator, so successive packets do not all share one value.
-func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
-	ids := map[uint16]bool{}
+// RFC 7915 Section 5.1: "Identification: Set according to a Fragment Identification generator at the translator."
+//
+// The generator follows RFC 7739 Section 5.3. With 16 bits, random values would repeat within a few hundred packets.
+func TestTranslateIPv6ToIPv4IdentificationDoesNotRepeatPerDestination(t *testing.T) {
 	translator := testTranslator()
-	for range 4 {
-		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 8))), layers.LayerTypeIPv6, gopacket.Default)
-		result := mustTranslate(t, func() (translation, error) {
-			return translateIPv6(t, translator, input)
-		})
-		ids[binary.BigEndian.Uint16(result[4:6])] = true
+	seen := map[uint16]bool{}
+	for range 1000 {
+		id := translatedIdentification(t, translator, ipv6Dest)
+		if seen[id] {
+			t.Fatalf("Identification %#x repeated within 1000 packets to one destination", id)
+		}
+		seen[id] = true
 	}
-	if len(ids) < 2 {
-		t.Fatalf("all translated packets carry the same IPv4 Identification: %v", ids)
+}
+
+// RFC 7739 Section 3 describes the attacks on predictable Identification values: one global counter would reveal the
+// translator's packet rate and the values sent to other destinations.
+func TestTranslateIPv6ToIPv4IdentificationIsUnrelatedAcrossDestinations(t *testing.T) {
+	translator := testTranslator()
+	previous := translatedIdentification(t, translator, ipv6Dest)
+	for i := range 8 {
+		destination := net.ParseIP(fmt.Sprintf("64:ff9b::101:%x", 0x102+i)) // 1.1.1.2 and up
+		id := translatedIdentification(t, translator, destination)
+		if id != previous+1 {
+			return
+		}
+		previous = id
 	}
+	t.Fatal("successive packets to different destinations carry consecutive Identification values")
+}
+
+func translatedIdentification(t *testing.T, translator *siit.Translator, destination net.IP) uint16 {
+	t.Helper()
+	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: destination}
+	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 8))), layers.LayerTypeIPv6, gopacket.Default)
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, translator, input)
+	})
+	return binary.BigEndian.Uint16(result[4:6])
 }
 
 // RFC 7915 Section 5.1 (SHOULD): "If the translator gets an illegal source address (e.g., ::1, etc.), the translator
