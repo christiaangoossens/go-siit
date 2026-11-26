@@ -109,7 +109,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPack
 		}
 
 		// Check the transport checksum (skip if fragment)
-		// RFC 768 Section 3: IPv4 UDP may omit its checksum.
+		// RFC 768: IPv4 UDP may omit its checksum.
 		pseudoHeader := ipv4PseudoHeader(ip.SrcIP, ip.DstIP, ip.Protocol, len(ip.Payload))
 		if !fragmented && !isZeroUDPChecksum(ip.Payload, ip.Protocol) && !validTransportChecksum(pseudoHeader, ip.Protocol, ip.Payload) {
 			return translated, fmt.Errorf("%w: invalid IPv4 transport checksum", ErrInvalidPacket)
@@ -169,7 +169,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPack
 		ipv6.Length = uint16(length)
 		payload = ip.Payload
 
-		// RFC 7915 Section 4.5: only the first fragment holds the transport header.
+		// Only the first fragment holds the transport header.
 		if ip.FragOffset == 0 {
 			payload, dropped = translateTransport(ip.Protocol, payload, removed, added, quoted)
 		}
@@ -212,7 +212,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPack
 			}
 			binary.BigEndian.PutUint16(payload[6:], checksum)
 		default:
-			// RFC 7915 Section 4.1 requires unsupported transport protocols to be forwarded unchanged.
+			// RFC 7915 Section 4.5 requires unsupported transport protocols to be forwarded unchanged.
 			payload, dropped = translateTransport(protocol, ip.Payload, removed, added, false)
 		}
 	}

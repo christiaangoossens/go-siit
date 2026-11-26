@@ -71,7 +71,7 @@ func translateTransport(protocol layers.IPProtocol, payload, removed, added []by
 		result[0] = newType
 		binary.BigEndian.PutUint16(result[2:], adjustChecksum(binary.BigEndian.Uint16(result[2:]), removed, added))
 	default:
-		// RFC 7915 Section 4.1 requires unsupported transport protocols to be forwarded unchanged.
+		// RFC 7915 Sections 4.5 and 5.5 require unsupported transport protocols to be forwarded unchanged.
 		return payload, false
 	}
 

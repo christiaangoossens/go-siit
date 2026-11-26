@@ -20,9 +20,10 @@
 //
 // Deliberately not tested, because the README lists it as unsupported: SHOULD-level behaviour the library does not
 // implement, namely ICMP errors for other discarded packets (RFC 7915 Sections 4.4 and 5.4), hairpinning (RFC 7757
-// Section 4), fragmentation of packets without DF and Fragmentation Needed for packets with DF (Section 4.1),
+// Section 4), fragmentation of packets without DF (Section 4.1), Fragmentation Needed for packets with DF (a MUST
+// in Section 4.1, left to the caller's interface MTU),
 // ignoring TOS / Traffic Class, configurable zero-checksum UDP, discarding every illegal source (network 0 and
 // Class E are translated with a Network-Specific Prefix) and truncating (instead of leaving out) an ICMP extension.
 // Likewise untested are Time Exceeded messages with a code above 1 (the RFC says "the Code is unchanged" but ICMPv6
-// defines none) and the jumbogram case (Section 5.1, out of scope).
+// defines none) and the jumbogram case (out of scope).
 package siit_test

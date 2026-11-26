@@ -15,7 +15,7 @@ import (
  */
 
 // Fragment Identification generator for IPv6-to-IPv4 packets that carry no Fragment Header (RFC 7915 Section 5.1).
-// It starts at a random value so the sequence is not trivially predictable (RFC 7739 Section 5).
+// It starts at a random value, like the per-destination counter of RFC 7739 Section 5.1.
 var nextIdentification = func() *atomic.Uint32 {
 	var counter atomic.Uint32
 	counter.Store(rand.Uint32())
@@ -70,7 +70,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 		payload = payload[:min(len(payload), end)]
 	}
 
-	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 1.2)
+	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 5.1)
 	// The IPv6
 	//  headers HOPOPT (0), IPv6-Route (43), and IPv6-Opts (60) are
 	//  skipped over during processing as they have no meaning in IPv4.
@@ -104,7 +104,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 	}
 
 	// ICMPv6 errors may use the IPv4 router address when the outer IPv6 source
-	// cannot be mapped to an IPv4 address (RFC 7915 Section 5.2 with RFC 6791 Section 3), since they can
+	// cannot be mapped to an IPv4 address (RFC 7915 Section 6 with RFC 6791), since they can
 	// come from native IPv6 routers. Ordinary packets would be answered to an address we can't map back.
 	// RFC 4443 defines types 0-127 as errors. A quoted packet has no such exception: an ICMP error quoting an ICMP error is not translated.
 	routerSource := !quoted && protocol == layers.IPProtocolICMPv6 && len(payload) > 0 && payload[0] < 128
@@ -146,7 +146,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 			return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet.Packet}
 		}
 
-		// RFC 8200 Section 8.1: IPv6 UDP checksum zero is invalid and the packet is silently dropped.
+		// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum".
 		if isZeroUDPChecksum(payload, protocol) {
 			return translated, nil
 		}
@@ -236,7 +236,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 		options = partialOptions
 		ipv4.Length = uint16(ipv4HeaderLength + length)
 
-		// RFC 7915 Section 5.5: only the first fragment holds the transport header.
+		// Only the first fragment holds the transport header.
 		if ipv4.FragOffset == 0 {
 			payload, dropped = translateTransport(protocol, payload, removed, added, quoted)
 		}

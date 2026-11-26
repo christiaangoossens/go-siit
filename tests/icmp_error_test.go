@@ -469,7 +469,7 @@ func TestTranslateICMPErrorsUseEAMForOuterAndQuotedAddresses(t *testing.T) {
 	})
 }
 
-// RFC 7915 Sections 5.2 and 5.3 with RFC 6791 Section 3 (SHOULD, and the only way for the IPv4 side to learn about
+// RFC 7915 Section 6 with RFC 6791 (SHOULD, and the only way for the IPv4 side to learn about
 // errors from native IPv6 routers): an ICMPv6 error whose source has no IPv4 mapping is translated with the
 // configured IPv4 router address as its source, for every error type and whatever the translator's prefix. The
 // destination must still map, because the error is addressed to a translated host; a query is never rewritten.
@@ -529,7 +529,7 @@ func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 	})
 }
 
-// RFC 7915 Sections 4.1 and 5.1 (SHOULD): the Time Exceeded message that the library generates for an expired
+// RFC 7915 Sections 4.1 and 5.1 (MUST): the Time Exceeded message that the library generates for an expired
 // IPv4 packet is addressed to the translated IPv4 sender, so feeding it back through TranslateIPv6 must produce a
 // deliverable ICMPv4 Time Exceeded for that sender.
 func TestGeneratedTimeExceededCanBeTranslatedBack(t *testing.T) {

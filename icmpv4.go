@@ -101,7 +101,7 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 			//   to destination).
 			newCode = 0
 		case 6, 7, 8:
-			// Code 6, 7, 8 (Destination Network/Host/Protocol Unknown):
+			// Code 6, 7, 8 (Destination Network/Host Unknown, Source Host Isolated):
 			// Set the Code to 0 (No route to destination).
 			newCode = 0
 		case 9, 10:

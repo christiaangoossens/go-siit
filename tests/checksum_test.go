@@ -165,16 +165,15 @@ func zeroUDPChecksum(t *testing.T, packet gopacket.Packet, headerLength int) []b
 	return data
 }
 
-// RFC 7915 Section 5.5 (MUST) with RFC 8200 Section 8.1: an IPv6 UDP packet with a zero checksum is invalid
-// and silently dropped.
+// RFC 8200 Section 8.1: an IPv6 UDP packet with a zero checksum is invalid and dropped.
 func TestTranslateIPv6ZeroChecksumUDPDropsPacket(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv6Segment(t, segmentUDP, ipv6Source, ipv6Dest, defaultTTL), ipv6HeaderLength)
 	result, err := translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
 	requireDropped(t, result, err)
 }
 
-// RFC 7915 Section 4.5 (MUST) with RFC 768: an unfragmented IPv4 UDP datagram without a checksum is
-// translated with a newly computed IPv6 checksum (the first of the two permitted behaviours; the other, dropping
+// RFC 7915 Section 4.5 (SHOULD) with RFC 768: an unfragmented IPv4 UDP datagram without a checksum is
+// translated with a newly computed IPv6 checksum (the second of the two permitted behaviours; the other, dropping
 // the packet, is not implemented, see the README).
 func TestTranslateIPv4ZeroChecksumUDPGetsComputedChecksum(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv4Segment(t, segmentUDP, ipv4Source, ipv4Dest, defaultTTL), ipv4HeaderLength)

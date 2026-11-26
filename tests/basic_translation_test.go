@@ -14,8 +14,8 @@ import (
 
 // RFC 7915 Sections 4.1 and 5.1 (MUST): the IP header fields are translated. Version, header length, Total Length /
 // Payload Length and protocol follow from the new header; the TTL / Hop Limit is decremented by one; the
-// Traffic Class and TOS (including the ECN bits) are copied (RFC 7915 "SHOULD ignore", see the README); the Flow
-// Label is zero towards IPv6; and an IPv6 packet of at most 1260 octets (IPv4 length) clears DF, a larger one sets it (RFC 7915 Section 5.1). The DF bit of an unfragmented IPv4 packet
+// Traffic Class and TOS (including the ECN bits) are copied (RFC 7915 SHOULD offer an option to ignore them, see
+// the README); the Flow Label is zero towards IPv6; and an IPv6 packet of at most 1260 octets (IPv4 length) clears DF, a larger one sets it (RFC 7915 Section 5.1). The DF bit of an unfragmented IPv4 packet
 // does not produce a Fragment header.
 func TestTranslateIPHeaderFields(t *testing.T) {
 	for _, tos := range []uint8{0, 0x2e << 2, 0x03, 0xff} {

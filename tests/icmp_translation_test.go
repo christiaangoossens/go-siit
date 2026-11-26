@@ -69,7 +69,7 @@ func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
 	}
 }
 
-// RFC 7915 Figures 3 and 6 (MUST) with RFC 792 / RFC 4443: the Parameter Problem pointer is mapped octet by octet
+// RFC 7915 Figures 3 and 6 with RFC 792 / RFC 4443: the Parameter Problem pointer is mapped octet by octet
 // to the pointer of the other family, and pointers to a field that has no counterpart ("n/a") cause a silent drop.
 // ICMPv4 carries the pointer in octet 4 of the message (codes 0 and 2 alike), ICMPv6 a 32-bit pointer. Every ICMPv4
 // pointer 0-20 and every ICMPv6 pointer 0-41 is covered.

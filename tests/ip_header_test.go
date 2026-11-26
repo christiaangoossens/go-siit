@@ -100,7 +100,7 @@ func TestTranslateIPv4Options(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.1 (MUST) with RFC 1122 Section 3.2.2 / RFC 4443 Section 2.4 (e): an ICMP error is never
+// RFC 7915 Section 4.1 (MUST) with RFC 1122 Section 3.2.2 / RFC 1812 Section 4.3.2.7: an ICMP error is never
 // answered with another ICMP error, so an ICMPv4 error that carries an unexpired source route is dropped silently
 // instead of triggering a Source Route Failed message. Regression guard: this case used to generate the error.
 func TestTranslateIPv4ICMPErrorWithSourceRouteIsDroppedSilently(t *testing.T) {
@@ -323,7 +323,7 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 }
 
 // RFC 7915 Sections 4.1 and 5.1 (MUST): an IPv4 TTL or IPv6 Hop Limit of 0 or 1 is not forwarded; the translator
-// answers with a complete Time Exceeded (SHOULD) that quotes the original packet, except for ICMP errors, which
+// answers with a complete Time Exceeded (MUST) that quotes the original packet, except for ICMP errors, which
 // never trigger another ICMP error (RFC 4443 Section 2.4 (e), RFC 1122 Section 3.2.2).
 func TestTranslateExpiredTTL(t *testing.T) {
 	for _, ttl := range []uint8{0, 1} {
@@ -410,7 +410,7 @@ func TestTranslateExpiredTTL(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.1 (SHOULD): the IPv4 Identification of an unfragmented packet is set according to a
+// RFC 7915 Section 5.1: the IPv4 Identification of an unfragmented packet is set according to a
 // Fragment Identification generator at the translator, so successive packets do not all share one value.
 func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 	ids := map[uint16]bool{}
@@ -428,10 +428,11 @@ func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.1 (SHOULD, with RFC 1812 Section 5.3.7): with a Network-Specific Prefix every IPv4 address can
-// be embedded, so an IPv6 address embedding an unspecified, loopback, link-local, multicast or broadcast IPv4 address
-// would be translated into an illegal IPv4 source or destination. It is rejected like the IPv4 direction. Explicit
-// address mappings (RFC 7757) are exempt, and a global address still translates.
+// RFC 7915 Section 5.1 (SHOULD for the source, local for the destination) with RFC 1812 Section 5.3.7: with a
+// Network-Specific Prefix every IPv4 address can be embedded, so an IPv6 address embedding an unspecified, loopback,
+// link-local, multicast or broadcast IPv4 address would be translated into an illegal IPv4 source or destination. It
+// is rejected like the IPv4 direction. Explicit address mappings (RFC 7757) are exempt, and a global address still
+// translates.
 func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 	embed := func(prefix string, address string) net.IP {
 		ipv4 := net.ParseIP(address).To4()

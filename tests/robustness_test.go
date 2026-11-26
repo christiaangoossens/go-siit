@@ -67,7 +67,7 @@ func TestTranslateReturnsSpecificErrors(t *testing.T) {
 	}
 }
 
-// RFC 7915 Sections 4.1, 5.1 and 5.5 (MUST: "translators MUST forward all transport protocols"): protocols other than
+// RFC 7915 Sections 4.5 and 5.5 (MUST: "translators MUST forward all transport protocols"): protocols other than
 // TCP, UDP and ICMP are forwarded with their payload unchanged, including payloads too short to contain a
 // recognizable header, and behind IPv6 extension headers that are skipped.
 func TestTranslateForwardsOtherProtocols(t *testing.T) {

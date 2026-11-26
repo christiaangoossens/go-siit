@@ -56,7 +56,7 @@ func embedIPv4(prefix net.IP, length int, ipv4 net.IP) net.IP {
 	return address
 }
 
-// RFC 6052 Sections 2.2 and 2.3 (MUST): an IPv4 address is embedded in, and extracted from, an IPv6 address
+// RFC 6052 Sections 2.2 (MUST) and 2.3: an IPv4 address is embedded in, and extracted from, an IPv6 address
 // according to the prefix length (32, 40, 48, 56, 64 or 96), with the "u" octet (bits 64-71) skipped and a zero
 // suffix. The first address is the example of Section 2.4, Table 1; the others come from a reference implementation.
 func TestRFC6052AddressFormat(t *testing.T) {
@@ -336,7 +336,7 @@ func TestEAMMappings(t *testing.T) {
 	}
 }
 
-// RFC 7757 Section 3.2 (MUST): the IPv4 and IPv6 prefixes of an EAM entry may have any of the lengths of RFC 6052.
+// Local: the IPv4 and IPv6 prefixes of an EAM entry may have any of the lengths of RFC 6052.
 func TestEAMSupportsRFC6052PrefixLengths(t *testing.T) {
 	for _, test := range []struct{ name, ipv4Prefix, ipv6Prefix, ipv4, ipv6 string }{
 		{"32", "192.0.2.0/0", "2001:db8::/32", "192.0.2.33", "2001:db8:c000:221::"},

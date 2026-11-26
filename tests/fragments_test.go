@@ -104,7 +104,7 @@ func TestTranslateFragments(t *testing.T) {
 	})
 }
 
-// RFC 7915 Section 1.2 (fragmented ICMP, MUST NOT be translated), Section 5.1.1 (a Fragment header followed by
+// RFC 7915 Section 1.2 (fragmented ICMP is not translated), Section 5.1.1 (a Fragment header followed by
 // an extension header other than ESP is dropped) and RFC 8200 Section 4.5 (every fragment but the last has a
 // payload that is a multiple of 8 octets; the Fragment header must be complete): packets that cannot be translated
 // as fragments are not translated at all.
