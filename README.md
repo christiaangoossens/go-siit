@@ -25,27 +25,31 @@ The library exposes an object called `Translator` which you can create using `Ne
 
 You should supply a NAT64 net (for RFC 6052), an IPv4 router address (when ICMP packets cannot have their source translated) and an EAM table (which may be empty for pure RFC 6052).
 
-Then, you can use the following functions on `Translator` to translate packets:
+Then, you can use the following functions on `Translator` to translate packets, starting at the IP header:
 
 ```
-TranslateIPv4(packet gopacket.Packet, overrides TranslationOverrides) (TranslatedPacket, error)
+TranslateIPv4(packet []byte) (Packet, error)
+TranslateIPv6(packet []byte) (Packet, error)
 
-TranslateIPv6(packet gopacket.Packet, overrides TranslationOverrides) (TranslatedPacket, error)
+// For packets that are already decoded with gopacket:
+TranslateIPv4Layer(ip *layers.IPv4) (Packet, error)
+TranslateIPv6Layer(ip *layers.IPv6) (Packet, error)
 ```
 
-You should not need to specify any translation overrides (they are just used for quoted packets that have different handling).
+`Packet` is the translated packet as bytes, with `Src()`, `Dst()` and `Version()` read from its header and `Decode()` for a lazy gopacket view. It is empty when the packet is dropped (`nil` error) or rejected (an error wrapping one of the `Err` values).
 
-The `TranslatedPacket` has the following type:
+When the translator answers a rejected packet with an ICMP error, the error is a `*TranslationError` whose `Reply` must be sent back out on the side that `Reply.Version()` names:
 
-```
-type TranslatedPacket struct {
-	Packet []byte
-	SrcIP  net.IP
-	DstIP  net.IP
+```go
+result, err := translator.TranslateIPv4(buffer[:n])
+var translationErr *siit.TranslationError
+if errors.As(err, &translationErr) {
+	send(translationErr.Reply)
+}
+if len(result) > 0 {
+	writeToIPv6(result)
 }
 ```
-
-You can use the src & dest IPs for logging. They are also returned on error (whenever possible).
 
 ## Unsupported
 

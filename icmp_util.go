@@ -72,7 +72,7 @@ func (t *Translator) translateQuotedIPv4(data []byte) []byte {
 		return nil
 	}
 
-	return translated.Packet
+	return translated
 }
 
 // translateQuotedIPv6 translates the packet quoted in an ICMPv6 error (RFC 7915 Section 5.3), nil if it is dropped.
@@ -86,5 +86,5 @@ func (t *Translator) translateQuotedIPv6(data []byte) []byte {
 		return nil
 	}
 
-	return translated.Packet
+	return translated
 }

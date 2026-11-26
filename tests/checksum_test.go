@@ -147,16 +147,10 @@ func TestTranslateRejectsInvalidChecksums(t *testing.T) {
 				data := append([]byte(nil), ipv4Segment(t, test.kind, ipv4Source, ipv4Dest, defaultTTL).Data()...)
 				data[test.offset] ^= 0x10
 				result, err = translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
-				if !result.src.Equal(ipv4TranslatedSource) || !result.dst.Equal(ipv4TranslatedDest) {
-					t.Fatalf("metadata was not preserved: %s -> %s", result.src, result.dst)
-				}
 			} else {
 				data := append([]byte(nil), ipv6Segment(t, test.kind, ipv6Source, ipv6Dest, defaultTTL).Data()...)
 				data[test.offset] ^= 0x10
 				result, err = translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
-				if !result.src.Equal(ipv6TranslatedSource) || !result.dst.Equal(ipv6TranslatedDest) {
-					t.Fatalf("metadata was not preserved: %s -> %s", result.src, result.dst)
-				}
 			}
 			if !errors.Is(err, siit.ErrInvalidPacket) || result.packet != nil {
 				t.Fatalf("packet with an invalid %s checksum was not rejected: err=%v", test.name, err)

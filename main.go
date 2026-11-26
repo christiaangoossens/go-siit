@@ -1,7 +1,6 @@
 package siit
 
 import (
-	"errors"
 	"fmt"
 	"net"
 )
@@ -25,43 +24,6 @@ type Translator struct {
 
 	// MTU is the IPv6 path MTU used to determine the maximum IPv4 packet size.
 	MTU uint32
-}
-
-type TranslationOverrides struct {
-	QuotedPacket bool
-}
-
-type TranslatedPacket struct {
-	Packet []byte
-	SrcIP  net.IP
-	DstIP  net.IP
-}
-
-var (
-	ErrInvalidPacket       = errors.New("Invalid packet")
-	ErrInvalidICMP         = errors.New("Invalid ICMP packet")
-	ErrUnsupportedProtocol = errors.New("Unsupported protocol")
-	ErrTimeExceeded        = errors.New("TTL or Hop Limit expired")
-	ErrUnsupportedSrcIP    = errors.New("Unsupported source IP address")
-	ErrUnsupportedDestIP   = errors.New("Unsupported destination IP address")
-	ErrPacketOversized     = errors.New("Packet is too large to be translated without possible fragmentation")
-	ErrInvalidMTU          = errors.New("MTU is below the IPv6 minimum")
-	ErrZeroUDPChecksum     = errors.New("UDP checksum is zero")
-)
-
-type TranslationError struct {
-	// Error that occurred during translation.
-	Err error
-	// Packet generated as a result of this error for sending back to the source of the original packet.
-	Packet []byte
-}
-
-func (e *TranslationError) Error() string {
-	return e.Err.Error()
-}
-
-func (e *TranslationError) Unwrap() error {
-	return e.Err
 }
 
 // NewTranslator creates a SIIT translator with the default IPv6 minimum MTU.

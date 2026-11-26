@@ -8,54 +8,55 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// Benchmarks for the per-packet cost of the translator. Each case runs twice: FromBytes includes decoding the raw
-// packet (what a tun reader pays), FromPacket starts from an already decoded packet.
+// Benchmarks for the per-packet cost of the translator. Each case runs twice: FromBytes starts from the raw packet
+// (what a tun reader has), FromLayer from a layer the caller already decoded with gopacket.
 func BenchmarkTranslate(b *testing.B) {
 	cases := []struct {
 		name      string
 		data      []byte
 		layerType gopacket.LayerType
-		translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
 	}{
-		{"TCP IPv4 to IPv6", benchmarkIPv4TCP(b, ipv4Source, ipv4Dest), layers.LayerTypeIPv4, benchmarkTranslateIPv4},
-		{"TCP IPv6 to IPv4", benchmarkIPv6TCP(b), layers.LayerTypeIPv6, benchmarkTranslateIPv6},
-		{"ICMPv4 error to ICMPv6", benchmarkIPv4ICMPError(b), layers.LayerTypeIPv4, benchmarkTranslateIPv4},
+		{"TCP IPv4 to IPv6", benchmarkIPv4TCP(b, ipv4Source, ipv4Dest), layers.LayerTypeIPv4},
+		{"TCP IPv6 to IPv4", benchmarkIPv6TCP(b), layers.LayerTypeIPv6},
+		{"ICMPv4 error to ICMPv6", benchmarkIPv4ICMPError(b), layers.LayerTypeIPv4},
 	}
 
 	for _, test := range cases {
 		b.Run(test.name+"/FromBytes", func(b *testing.B) {
 			translator := testTranslator()
+			translate := translator.TranslateIPv4
+			if test.layerType == layers.LayerTypeIPv6 {
+				translate = translator.TranslateIPv6
+			}
 			b.ReportAllocs()
 
 			for b.Loop() {
-				packet := gopacket.NewPacket(test.data, test.layerType, gopacket.Default)
-				benchmarkRequireTranslated(b, test.translate, translator, packet)
+				result, err := translate(test.data)
+				benchmarkRequireTranslated(b, result, err)
 			}
 		})
 
-		b.Run(test.name+"/FromPacket", func(b *testing.B) {
+		b.Run(test.name+"/FromLayer", func(b *testing.B) {
 			translator := testTranslator()
 			packet := gopacket.NewPacket(test.data, test.layerType, gopacket.Default)
 			b.ReportAllocs()
 
 			for b.Loop() {
-				benchmarkRequireTranslated(b, test.translate, translator, packet)
+				var result siit.Packet
+				var err error
+				if ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4); ok {
+					result, err = translator.TranslateIPv4Layer(ip)
+				} else {
+					result, err = translator.TranslateIPv6Layer(packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6))
+				}
+				benchmarkRequireTranslated(b, result, err)
 			}
 		})
 	}
 }
 
-func benchmarkTranslateIPv4(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
-	return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
-}
-
-func benchmarkTranslateIPv6(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
-	return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-}
-
-func benchmarkRequireTranslated(b *testing.B, translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error), translator *siit.Translator, packet gopacket.Packet) {
-	result, err := translate(translator, packet)
-	if err != nil || result.Packet == nil {
+func benchmarkRequireTranslated(b *testing.B, result siit.Packet, err error) {
+	if err != nil || len(result) == 0 {
 		b.Fatalf("benchmark packet was not translated: err=%v", err)
 	}
 }

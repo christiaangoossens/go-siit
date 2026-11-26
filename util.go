@@ -23,8 +23,8 @@ var (
 	partialOptions = gopacket.SerializeOptions{ComputeChecksums: true}
 )
 
-// serializeTranslatedPacket writes the IP header in front of the payload.
-func serializeTranslatedPacket(options gopacket.SerializeOptions, srcIP, dstIP net.IP, header gopacket.SerializableLayer, payload []byte) TranslatedPacket {
+// serializePacket writes the IP header in front of the payload. Callers treat an empty packet as a failure.
+func serializePacket(options gopacket.SerializeOptions, header gopacket.SerializableLayer, payload []byte) Packet {
 	headerLength := ipv4HeaderLength
 	if header.LayerType() == layers.LayerTypeIPv6 {
 		headerLength = ipv6HeaderLength
@@ -32,11 +32,10 @@ func serializeTranslatedPacket(options gopacket.SerializeOptions, srcIP, dstIP n
 
 	buffer := gopacket.NewSerializeBufferExpectedSize(headerLength, len(payload))
 	if err := gopacket.SerializeLayers(buffer, options, header, gopacket.Payload(payload)); err != nil {
-		// Callers treat a packet without bytes as a failure.
-		return TranslatedPacket{SrcIP: srcIP, DstIP: dstIP}
+		return nil
 	}
 
-	return TranslatedPacket{Packet: buffer.Bytes(), SrcIP: srcIP, DstIP: dstIP}
+	return buffer.Bytes()
 }
 
 func getBit(address net.IP, bitIndex int) byte {

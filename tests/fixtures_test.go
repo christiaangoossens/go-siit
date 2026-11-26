@@ -1,9 +1,11 @@
 package siit_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -133,32 +135,72 @@ func checksum(data []byte) uint16 {
 type translation struct {
 	// Translated packet, nil when the packet is dropped or rejected.
 	packet []byte
-	// Addresses of the translated packet.
-	src, dst net.IP
+
 	// ICMP error generated for the sender of the packet, nil when there is none.
 	reply []byte
 }
 
+// translateIPv4 translates the packet both from its bytes and from its decoded layer, and requires the same outcome.
 func translateIPv4(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
 	t.Helper()
-	result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{})
+	data := slices.Clone(packet.Data())
+	result, err := translator.TranslateIPv4(data)
+	requireUnchanged(t, data, packet.Data())
+
+	layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	layerResult, layerErr := translator.TranslateIPv4Layer(layer)
+	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
 	return newTranslation(result, err), err
 }
 
 func translateIPv6(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
 	t.Helper()
-	result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+	data := slices.Clone(packet.Data())
+	result, err := translator.TranslateIPv6(data)
+	requireUnchanged(t, data, packet.Data())
+
+	layer, _ := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	layerResult, layerErr := translator.TranslateIPv6Layer(layer)
+	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
 	return newTranslation(result, err), err
 }
 
-func newTranslation(result siit.TranslatedPacket, err error) translation {
+func newTranslation(result siit.Packet, err error) translation {
 	var reply []byte
 	var translationErr *siit.TranslationError
 	if errors.As(err, &translationErr) {
-		reply = translationErr.Packet
+		reply = translationErr.Reply
 	}
 
-	return translation{packet: result.Packet, src: result.SrcIP, dst: result.DstIP, reply: reply}
+	return translation{packet: result, reply: reply}
+}
+
+func requireUnchanged(t *testing.T, input, original []byte) {
+	t.Helper()
+	if !bytes.Equal(input, original) {
+		t.Fatal("the translator modified its input")
+	}
+}
+
+// requireSameTranslation compares the outcomes of the bytes and the layer entry points. The Identification of an
+// unfragmented IPv4 packet is generated per packet, so it and the header checksum are left out.
+func requireSameTranslation(t *testing.T, fromBytes translation, bytesErr error, fromLayer translation, layerErr error) {
+	t.Helper()
+	sameErr := (bytesErr == nil) == (layerErr == nil)
+	if !sameErr || !bytes.Equal(withoutIdentification(fromBytes.packet), withoutIdentification(fromLayer.packet)) || !bytes.Equal(fromBytes.reply, fromLayer.reply) {
+		t.Fatalf("bytes and layer translations differ: err=%v and err=%v", bytesErr, layerErr)
+	}
+}
+
+func withoutIdentification(packet []byte) []byte {
+	if len(packet) < ipv4HeaderLength || packet[0]>>4 != 4 {
+		return packet
+	}
+
+	packet = slices.Clone(packet)
+	clear(packet[4:6])
+	clear(packet[ipv4ChecksumOffset : ipv4ChecksumOffset+2])
+	return packet
 }
 
 func mustTranslate(t *testing.T, translate func() (translation, error)) []byte {

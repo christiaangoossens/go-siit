@@ -65,12 +65,11 @@ func TestTranslateIPv4Options(t *testing.T) {
 				t.Fatalf("test packet does not carry IPv4 options: IHL=%d", parsed.IHL)
 			}
 			result, err := translateIPv4(t, testTranslator(), input)
-			if err != nil {
-				t.Fatalf("translation failed: %v", err)
-			}
 			if test.sourceFailed {
-				// Local API contract: the generated ICMPv4 error is returned in Packet with a nil error.
-				packet := gopacket.NewPacket(result.packet, layers.LayerTypeIPv4, gopacket.Default)
+				if !errors.Is(err, siit.ErrSourceRouteFailed) || result.packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrSourceRouteFailed", err, len(result.packet))
+				}
+				packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv4, gopacket.Default)
 				outer, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 				if !ok || !outer.SrcIP.Equal(ipv4RouterAddress) || !outer.DstIP.Equal(ipv4Source) || outer.Protocol != layers.IPProtocolICMPv4 {
 					t.Fatalf("unexpected source-route error IPv4 header: %+v", outer)
@@ -84,6 +83,9 @@ func TestTranslateIPv4Options(t *testing.T) {
 					t.Fatalf("source-route error did not quote the original IPv4 header: %v", quoted.ErrorLayer())
 				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("translation failed: %v", err)
 			}
 			packet := gopacket.NewPacket(result.packet, layers.LayerTypeIPv6, gopacket.Default)
 			ip6, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
