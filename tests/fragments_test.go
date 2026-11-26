@@ -17,6 +17,20 @@ import (
 //
 // Fragments are translated one by one, without reassembly, in both directions (RFC 7915 Sections 4.1 and 5.1.1).
 // Towards IPv4 only the low 16 bits of the Identification are kept.
+//
+// RFC 7915 Section 4.1 (MUST): "otherwise, the protocol field MUST be copied from the IPv4 header."
+//
+// RFC 7915 Section 4.1: "Total length value from the IPv4 header, plus 8 for the Fragment Header, minus the size of
+// the IPv4 header and IPv4 options, if present."
+//
+// RFC 7915 Section 5.1.1 (MUST): "the Total Length MUST be set to Payload Length value from IPv6 header, minus the
+// length of the extension headers up to the Fragmentation Header, minus 8 for the Fragment Header, plus the size of
+// the IPv4 header."
+//
+// RFC 7915 Section 5.1.1: "The IPv4 Don't Fragment (DF) flag is cleared (set to zero), allowing this packet to be
+// further fragmented by IPv4 routers."
+//
+// The DF bit stays clear above 1260 octets too, where an unfragmented packet would get it.
 func TestTranslateFragments(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -82,16 +96,79 @@ func TestTranslateFragments(t *testing.T) {
 		})
 	}
 
+	t.Run("IPv4 to IPv6/Don't Fragment and More Fragments", func(t *testing.T) {
+		ip := &layers.IPv4{
+			Version: 4, IHL: 5, Id: 0x1234, TTL: defaultTTL, Flags: layers.IPv4DontFragment | layers.IPv4MoreFragments,
+			Protocol: layers.IPProtocolTCP, SrcIP: ipv4Source, DstIP: ipv4Dest,
+		}
+		_, fragment := translatedIPv4Fragment(t, ip, tcpFragmentPayload([]byte{0, 1, 2, 3}))
+		if !fragment.MoreFragments || fragment.Identification != 0x1234 {
+			t.Fatalf("unexpected translated fragment metadata: %+v", fragment)
+		}
+	})
+	for _, test := range []struct {
+		name     string
+		protocol layers.IPProtocol
+		offset   uint16
+	}{
+		{"UDP first fragment", layers.IPProtocolUDP, 0},
+		{"GRE middle fragment", layers.IPProtocolGRE, 5},
+	} {
+		t.Run("IPv4 to IPv6/"+test.name, func(t *testing.T) {
+			ip := &layers.IPv4{
+				Version: 4, IHL: 5, Id: 0x1234, TTL: defaultTTL, Flags: layers.IPv4MoreFragments, FragOffset: test.offset,
+				Protocol: test.protocol, SrcIP: ipv4Source, DstIP: ipv4Dest,
+			}
+			payload := bytes.Repeat([]byte{0xcd}, 16)
+			if test.protocol == layers.IPProtocolUDP {
+				payload = fragmentSegment(t, segmentUDP, ip, make([]byte, 24)) // a non-zero checksum
+			}
+
+			ip6, fragment := translatedIPv4Fragment(t, ip, payload)
+			if fragment.NextHeader != test.protocol || int(ip6.Length) != 8+len(payload) {
+				t.Fatalf("got Next Header %d and Payload Length %d, want %d and %d", fragment.NextHeader, ip6.Length, test.protocol, 8+len(payload))
+			}
+		})
+	}
+
 	t.Run("IPv6 to IPv4/Hop-by-Hop before the Fragment header", func(t *testing.T) {
 		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6HopByHop, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 		fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolTCP, MoreFragments: true, Identification: 0x01020304}
-		payload := tcpFragmentPayload([]byte{0, 1, 2, 3})
+		payload := tcpFragmentPayload(make([]byte, 1244)) // a 1284-octet IPv4 fragment
 		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(cat(optionsHeader(layers.IPProtocolIPv6Fragment), ipv6FragmentHeader(fragment), payload))), layers.LayerTypeIPv6, gopacket.Default)
-		translated := translateToIPv4Packet(t, input).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+		translated := translatedIPv6Fragment(t, input)
 		if translated.Protocol != layers.IPProtocolTCP || translated.Flags&layers.IPv4MoreFragments == 0 || translated.Id != 0x0304 || !bytes.Equal(translated.Payload, payload) {
 			t.Fatalf("fragment behind Hop-by-Hop was not translated correctly: %+v", translated)
 		}
+
+		if translated.Length != 1284 || translated.Checksum != ipv4HeaderChecksum(translated) || translated.Flags&layers.IPv4DontFragment != 0 {
+			t.Fatalf("got Total Length %d, checksum %#x and flags %v, want 1284, a valid checksum and no DF", translated.Length, translated.Checksum, translated.Flags)
+		}
 	})
+	t.Run("IPv6 to IPv4/No Next Header in an atomic fragment", func(t *testing.T) {
+		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+		fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolNoNextHeader, Identification: 0x01020304}
+		input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, nil), layers.LayerTypeIPv6, gopacket.Default)
+		translated := translatedIPv6Fragment(t, input)
+		if translated.Protocol != layers.IPProtocolNoNextHeader || translated.Flags != 0 || translated.FragOffset != 0 || translated.Id != 0x0304 || translated.Length != ipv4HeaderLength {
+			t.Fatalf("unexpected translated atomic fragment: %+v", translated)
+		}
+	})
+	for _, more := range []bool{true, false} {
+		t.Run(fmt.Sprintf("IPv6 to IPv4/1440-octet fragment, M=%t", more), func(t *testing.T) {
+			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+			fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolTCP, FragmentOffset: 180, MoreFragments: more, Identification: 0x01020304}
+			input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 1440)), layers.LayerTypeIPv6, gopacket.Default)
+			translated := translatedIPv6Fragment(t, input)
+			if translated.Length != ipv4HeaderLength+1440 || translated.Flags&layers.IPv4DontFragment != 0 || translated.Id != 0x0304 {
+				t.Fatalf("got Total Length %d, flags %v and ID %#x, want %d, no DF and 0x0304", translated.Length, translated.Flags, translated.Id, ipv4HeaderLength+1440)
+			}
+
+			if (translated.Flags&layers.IPv4MoreFragments != 0) != more || translated.FragOffset != 180 {
+				t.Fatalf("got flags %v and offset %d, want MF=%t and 180", translated.Flags, translated.FragOffset, more)
+			}
+		})
+	}
 	t.Run("IPv6 to IPv4/ESP behind the Fragment header", func(t *testing.T) {
 		// ESP is the one header that may follow a Fragment header (RFC 7915 Section 5.1.1).
 		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
@@ -121,6 +198,13 @@ func TestTranslateDropsInvalidFragments(t *testing.T) {
 		return gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, payload), layers.LayerTypeIPv6, gopacket.Default)
 	}
 	destinationOptions := cat([]byte{byte(layers.IPProtocolTCP), 0, 0, 0, 0, 0, 0, 0}, tcpFragmentPayload([]byte("extension")))
+	// surroundedFragment puts the same extension header before and after the Fragment header.
+	surroundedFragment := func(extension layers.IPProtocol) gopacket.Packet {
+		ip := &layers.IPv6{Version: 6, NextHeader: extension, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+		fragment := &layers.IPv6Fragment{NextHeader: extension, Identification: 0x01020304}
+		headers := cat(optionsHeader(layers.IPProtocolIPv6Fragment), ipv6FragmentHeader(fragment), optionsHeader(layers.IPProtocolTCP))
+		return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(cat(headers, tcpFragmentPayload(nil)))), layers.LayerTypeIPv6, gopacket.Default)
+	}
 	tests := []struct {
 		name   string
 		v4     bool
@@ -139,6 +223,8 @@ func TestTranslateDropsInvalidFragments(t *testing.T) {
 		{"IPv6 fragment followed by AH", false, v6Fragment(layers.IPProtocolAH, false, 0, make([]byte, 8))},
 		{"IPv6 fragment followed by Mobility Header", false, v6Fragment(layers.IPProtocol(135), false, 0, make([]byte, 8))},
 		{"IPv6 fragment followed by another Fragment header", false, v6Fragment(layers.IPProtocolIPv6Fragment, false, 0, make([]byte, 8))},
+		{"IPv6 Hop-by-Hop, Fragment, Hop-by-Hop", false, surroundedFragment(layers.IPProtocolIPv6HopByHop)},
+		{"IPv6 Destination Options, Fragment, Destination Options", false, surroundedFragment(layers.IPProtocolIPv6Destination)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -151,6 +237,22 @@ func TestTranslateDropsInvalidFragments(t *testing.T) {
 			}
 			if result.packet != nil {
 				t.Fatalf("packet was translated: err=%v", err)
+			}
+		})
+	}
+
+	// RFC 791 Section 2.3: "(the second portion might not be an integral multiple of 8 octets, but the first must be)"
+	//
+	// RFC 8200 Section 4.5: "If the length of a fragment, as derived from the fragment packet's Payload Length field,
+	// is not a multiple of 8 octets and the M flag of that fragment is 1, then that fragment must be discarded"
+	//
+	// After translation, an unaligned IPv4 fragment with MF=1 would be such an IPv6 fragment, so it is rejected like
+	// the IPv6 one above.
+	for _, offset := range []uint16{0, 1} {
+		t.Run(fmt.Sprintf("IPv4 unaligned non-final fragment at offset %d", offset), func(t *testing.T) {
+			result, err := translateIPv4(t, testTranslator(), v4Fragment(layers.IPProtocolGRE, layers.IPv4MoreFragments, offset, make([]byte, 7)))
+			if !errors.Is(err, siit.ErrInvalidPacket) || result.packet != nil {
+				t.Fatalf("got err=%v, packet length %d, want ErrInvalidPacket", err, len(result.packet))
 			}
 		})
 	}
@@ -182,6 +284,28 @@ func ipv6FragmentHeader(fragment *layers.IPv6Fragment) []byte {
 func serializeIPv6FragmentPacket(t *testing.T, ip *layers.IPv6, fragment *layers.IPv6Fragment, payload []byte) []byte {
 	t.Helper()
 	return serializeTestPacket(t, ip, gopacket.Payload(append(ipv6FragmentHeader(fragment), payload...)))
+}
+
+// translatedIPv4Fragment translates an IPv4 fragment and returns the IPv6 header and its Fragment header.
+func translatedIPv4Fragment(t *testing.T, ip *layers.IPv4, payload []byte) (*layers.IPv6, *layers.IPv6Fragment) {
+	t.Helper()
+	packet := translateIPv4Raw(t, serializeTestPacket(t, ip, gopacket.Payload(payload)))
+	fragment, ok := packet.Layer(layers.LayerTypeIPv6Fragment).(*layers.IPv6Fragment)
+	if !ok {
+		t.Fatalf("missing IPv6 Fragment header: %v", packet.ErrorLayer())
+	}
+
+	return packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6), fragment
+}
+
+// translatedIPv6Fragment translates an IPv6 fragment of up to 1500 octets and returns the IPv4 header.
+func translatedIPv6Fragment(t *testing.T, input gopacket.Packet) *layers.IPv4 {
+	t.Helper()
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, translatorWithMTU(t, 1500), input)
+	})
+
+	return gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 }
 
 // RFC 7915 Section 5.1.1 (SHOULD): "If the Next Header field of the Fragment Header is an extension header (except
@@ -220,6 +344,22 @@ func TestTranslateIPv4ZeroChecksumUDPFirstFragmentRejected(t *testing.T) {
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(udp)), layers.LayerTypeIPv4, gopacket.Default)
 	result, err := translateIPv4(t, testTranslator(), input)
 	requireZeroUDPChecksumError(t, result, err, endpoint(ipv4Source, testSourcePort), endpoint(ipv4Dest, dnsPort))
+}
+
+// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the error."
+//
+// The first fragment holds the UDP header, so it is rejected with the same error as an unfragmented datagram.
+func TestTranslateIPv6ZeroChecksumUDPFirstFragmentRejected(t *testing.T) {
+	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+	fragment := &layers.IPv6Fragment{NextHeader: layers.IPProtocolUDP, MoreFragments: true, Identification: 0x01020304}
+	udp := make([]byte, 16)
+	binary.BigEndian.PutUint16(udp[0:2], testSourcePort)
+	binary.BigEndian.PutUint16(udp[2:4], dnsPort)
+	binary.BigEndian.PutUint16(udp[4:6], 100) // length of the whole datagram; checksum (octets 6-7) stays zero
+
+	input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, udp), layers.LayerTypeIPv6, gopacket.Default)
+	result, err := translateIPv6(t, testTranslator(), input)
+	requireZeroUDPChecksumError(t, result, err, endpoint(ipv6Source, testSourcePort), endpoint(ipv6Dest, dnsPort))
 }
 
 // RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain

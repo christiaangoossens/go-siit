@@ -16,6 +16,7 @@ const (
 	bothDirections = iota
 	ipv4ToIPv6Only
 	ipv6ToIPv4Only
+	neverTranslated
 )
 
 // requireAddressMapping sends packets whose source and destination are the given address through the translator
@@ -39,6 +40,22 @@ func requireAddressMapping(t *testing.T, translator *siit.Translator, ipv4, ipv6
 		if !ip.SrcIP.Equal(ipv4) || !ip.DstIP.Equal(ipv4) {
 			t.Fatalf("IPv6 %s was translated to %s -> %s, want %s", ipv6, ip.SrcIP, ip.DstIP, ipv4)
 		}
+	}
+}
+
+// requireAddressDropped checks that packets whose source and destination are the given address are not translated,
+// in either direction.
+func requireAddressDropped(t *testing.T, translator *siit.Translator, ipv4, ipv6 net.IP) {
+	t.Helper()
+
+	result, err := translateIPv4(t, translator, ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4))
+	if result.packet != nil {
+		t.Fatalf("IPv4 %s was translated: err=%v", ipv4, err)
+	}
+
+	result, err = translateIPv6(t, translator, ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6, ipv6))
+	if result.packet != nil {
+		t.Fatalf("IPv6 %s was translated: err=%v", ipv6, err)
 	}
 }
 
@@ -107,6 +124,12 @@ func TestRFC6052AddressFormat(t *testing.T) {
 // the Well-Known Prefix and a non-global IPv4 address; they MUST drop these packets."
 //
 // The neighbours of each range must still be translated. A Network-Specific Prefix has no such restriction.
+//
+// RFC 7526 Section 4: "This document formally deprecates the anycast 6to4 transition mechanism defined in [RFC3068]
+// and the associated anycast IPv4 address 192.88.99.1."
+//
+// Deviation: RFC 5735 Section 3 lists 192.88.99.0/24, so RFC 6052 Section 3.1 requires dropping 192.88.99.52. It is
+// translated, because the block is deprecated (docs/rfc-deviations.md).
 func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 	tests := []struct {
 		address string
@@ -117,6 +140,7 @@ func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 		{"127.0.0.2", false}, {"169.253.255.255", true}, {"169.254.1.1", false}, {"169.255.0.1", true},
 		{"172.15.255.255", true}, {"172.16.5.5", false}, {"172.31.255.255", false}, {"172.32.0.1", true},
 		{"192.0.0.1", false}, {"192.0.1.1", true}, {"192.0.2.1", false}, {"192.0.3.1", true},
+		{"192.88.99.52", true}, // deviation, see above
 		{"192.167.255.255", true}, {"192.168.1.1", false}, {"192.169.0.1", true},
 		{"198.17.255.255", true}, {"198.18.0.1", false}, {"198.19.255.255", false}, {"198.20.0.1", true},
 		{"198.51.100.1", false}, {"203.0.113.1", false}, {"203.0.114.1", true},
@@ -159,6 +183,21 @@ func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 	}
 }
 
+// RFC 8215 Section 5: "Therefore, the restrictions on the use of the WKP described in Section 3.1 of [RFC6052] do
+// not apply to the use of 64:ff9b:1::/48."
+//
+// So 64:ff9b:1::/96 is a Network-Specific Prefix, and non-global addresses are translated with it.
+func TestRFC8215LocalUsePrefixIsNotTheWellKnownPrefix(t *testing.T) {
+	translator := translatorWithPrefix(t, "64:ff9b:1::/96", nil)
+
+	for _, address := range []string{"10.1.3.4", "192.168.22.69"} {
+		t.Run(address, func(t *testing.T) {
+			ipv4 := net.ParseIP(address).To4()
+			requireAddressMapping(t, translator, ipv4, embedIPv4(net.ParseIP("64:ff9b:1::"), 96, ipv4), bothDirections)
+		})
+	}
+}
+
 // RFC 7915 Sections 5.1 and 6 with RFC 6791 Section 3 and RFC 6052 Section 3.1: only ICMPv6 errors from native IPv6
 // routers use the router address. An ordinary packet from a source, or to a destination, that has no stateless
 // mapping cannot be translated, because replies could not be mapped back.
@@ -186,14 +225,27 @@ func TestIPv4MappedAddressIsNotInTheNAT64Prefix(t *testing.T) {
 	}
 }
 
+// RFC 6052 Section 2.2 (SHOULD): "Address translators who receive IPv4-embedded IPv6 addresses where these bits are
+// not zero SHOULD ignore the bits' value and proceed as if the bits' value were zero."
+//
+// RFC 6052 Section 2.3: "For the other prefix lengths, remove the 'u' octet to obtain a 120-bit sequence"
+//
+// So a non-zero suffix and a non-zero u octet are both ignored.
 func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 	for _, prefix := range []string{"2001:db8::/32", "2001:db8:100::/40", "2001:db8:122::/48", "2001:db8:122:300::/56", "2001:db8:122:344::/64"} {
 		t.Run(prefix, func(t *testing.T) {
 			_, network, _ := net.ParseCIDR(prefix)
 			length, _ := network.Mask.Size()
-			address := embedIPv4(network.IP, length, net.ParseIP("192.0.2.33").To4())
-			address[15] = 0x7f // the last octet is always part of the suffix for these prefix lengths
-			requireAddressMapping(t, translatorWithPrefix(t, prefix, nil), net.ParseIP("192.0.2.33").To4(), address, ipv6ToIPv4Only)
+			ipv4 := net.ParseIP("192.0.2.33").To4()
+			translator := translatorWithPrefix(t, prefix, nil)
+
+			address := embedIPv4(network.IP, length, ipv4)
+			address[8] = 0xff
+			for index := length/8 + 5; index < 16; index++ { // the prefix, 4 IPv4 octets and the u octet come first
+				address[index] = 0xff
+			}
+
+			requireAddressMapping(t, translator, ipv4, address, ipv6ToIPv4Only)
 		})
 	}
 }
@@ -279,6 +331,10 @@ func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 // implementation MUST proceed to translate the address in accordance with [RFC6145] (and its updates)."
 //
 // The first table is Figure 1 of RFC 7757.
+//
+// Its mappings are the rows of RFC 7757 Figure 7, plus 192.0.2.20 and 192.0.2.129. RFC 7757 Figure 7
+// maps 192.0.2.248 with 64:ff9b::/96, but RFC 6052 Section 3.1 forbids that prefix for the non-global 192.0.2.0/24,
+// so the translator drops it. With a Network-Specific Prefix it is translated.
 func TestEAMMappings(t *testing.T) {
 	type mapping struct {
 		ipv4, ipv6 string
@@ -286,26 +342,86 @@ func TestEAMMappings(t *testing.T) {
 	}
 	tests := []struct {
 		name     string
+		prefix   string // the RFC 6052 prefix; empty for 64:ff9b::/96
 		table    rawEAMTable
 		mappings []mapping
 	}{
 		{
-			name: "RFC 7757 Figure 1",
-			table: rawEAMTable{
-				{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8:aaaa::"},
-				{IPv4Prefix: "192.0.2.2/32", IPv6Prefix: "2001:db8:bbbb::b/128"},
-				{IPv4Prefix: "192.0.2.16/28", IPv6Prefix: "2001:db8:cccc::/124"},
-				{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"},
-				{IPv4Prefix: "192.0.2.192/29", IPv6Prefix: "2001:db8:eeee:8::/62"},
-				{IPv4Prefix: "192.0.2.224/31", IPv6Prefix: "64:ff9b::/127"},
-			},
+			name:  "RFC 7757 Figure 1",
+			table: rfc7757Figure1,
 			mappings: []mapping{
 				{"192.0.2.1", "2001:db8:aaaa::", bothDirections},
 				{"192.0.2.2", "2001:db8:bbbb::b", bothDirections},
+				{"192.0.2.16", "2001:db8:cccc::", bothDirections},
 				{"192.0.2.20", "2001:db8:cccc::4", bothDirections},
+				{"192.0.2.24", "2001:db8:cccc::8", bothDirections},
+				{"192.0.2.31", "2001:db8:cccc::f", bothDirections},
+				{"192.0.2.128", "2001:db8:dddd::", bothDirections},
 				{"192.0.2.129", "2001:db8:dddd:0:400::", bothDirections},
+				{"192.0.2.152", "2001:db8:dddd:0:6000::", bothDirections},
+				{"192.0.2.183", "2001:db8:dddd:0:dc00::", bothDirections},
+				{"192.0.2.191", "2001:db8:dddd:0:fc00::", bothDirections},
 				{"192.0.2.195", "2001:db8:eeee:9:8000::", bothDirections},
 				{"192.0.2.225", "64:ff9b::1", bothDirections},
+				{"192.0.2.248", "64:ff9b::c000:2f8", neverTranslated},
+			},
+		},
+		{
+			name:   "RFC 7757 Figure 1 with a Network-Specific Prefix",
+			prefix: "2001:db8:122:344::/96",
+			table:  rfc7757Figure1,
+			mappings: []mapping{
+				{"192.0.2.1", "2001:db8:aaaa::", bothDirections},
+				{"192.0.2.248", "2001:db8:122:344::c000:2f8", bothDirections},
+			},
+		},
+		{
+			// RFC 7757 Section 5: the IPv4 prefixes overlap, so the mapping is not symmetric.
+			name: "RFC 7757 Figure 2",
+			table: rawEAMTable{
+				{IPv4Prefix: "0.0.0.0/0", IPv6Prefix: "2001:db8:ff00::/40"},
+				{IPv4Prefix: "198.51.100.64/32", IPv6Prefix: "2001:db8::abcd/128"},
+			},
+			mappings: []mapping{
+				{"198.51.100.64", "2001:db8:ffc6:3364:4000::", ipv6ToIPv4Only},
+				{"198.51.100.64", "2001:db8::abcd", bothDirections},
+			},
+		},
+		{
+			// Derived from RFC 7757 Figure 5; RFC 7757 gives no example address for it.
+			name:  "IVI table of RFC 7757 Figure 5",
+			table: rawEAMTable{{IPv4Prefix: "0.0.0.0/0", IPv6Prefix: "2001:db8:ff00::/40"}},
+			mappings: []mapping{
+				{"192.0.2.33", "2001:db8:ffc0:2:2100::", bothDirections},
+			},
+		},
+		{
+			name: "RFC 7757 Figure 6",
+			table: rawEAMTable{
+				{IPv4Prefix: "203.0.113.1/32", IPv6Prefix: "2001:db8:aaaa::1/128"},
+				{IPv4Prefix: "203.0.113.2/32", IPv6Prefix: "2001:db8:bbbb::1/128"},
+			},
+			mappings: []mapping{
+				{"203.0.113.1", "2001:db8:aaaa::1", bothDirections},
+				{"203.0.113.2", "2001:db8:bbbb::1", bothDirections},
+			},
+		},
+		{
+			name:  "first and last address of an entry",
+			table: rawEAMTable{{IPv4Prefix: "10.0.0.0/24", IPv6Prefix: "2001:db8:beef:0:cafe::/120"}},
+			mappings: []mapping{
+				{"10.0.0.0", "2001:db8:beef:0:cafe::", bothDirections},
+				{"10.0.0.255", "2001:db8:beef:0:cafe::ff", bothDirections},
+			},
+		},
+		{
+			// Local: host bits of an entry are ignored, so 7.0.0.1/24 is 7.0.0.0/24.
+			name:  "entry with host bits set",
+			table: rawEAMTable{{IPv4Prefix: "7.0.0.1/24", IPv6Prefix: "7::/120"}},
+			mappings: []mapping{
+				{"7.0.0.0", "7::", bothDirections},
+				{"7.0.0.1", "7::1", bothDirections},
+				{"7.0.0.200", "7::c8", bothDirections},
 			},
 		},
 		{
@@ -369,12 +485,50 @@ func TestEAMMappings(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			translator := testTranslatorWithEAM(test.table)
+			if test.prefix != "" {
+				translator = translatorWithPrefix(t, test.prefix, test.table)
+			}
+
 			for _, mapping := range test.mappings {
 				t.Run(fmt.Sprintf("%s %s", mapping.ipv4, mapping.ipv6), func(t *testing.T) {
-					requireAddressMapping(t, translator, net.ParseIP(mapping.ipv4).To4(), net.ParseIP(mapping.ipv6), mapping.direction)
+					ipv4, ipv6 := net.ParseIP(mapping.ipv4).To4(), net.ParseIP(mapping.ipv6)
+					if mapping.direction == neverTranslated {
+						requireAddressDropped(t, translator, ipv4, ipv6)
+						return
+					}
+
+					requireAddressMapping(t, translator, ipv4, ipv6, mapping.direction)
 				})
 			}
 		})
+	}
+}
+
+// rfc7757Figure1 is the example EAM table of RFC 7757 Figure 1.
+var rfc7757Figure1 = rawEAMTable{
+	{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8:aaaa::"},
+	{IPv4Prefix: "192.0.2.2/32", IPv6Prefix: "2001:db8:bbbb::b/128"},
+	{IPv4Prefix: "192.0.2.16/28", IPv6Prefix: "2001:db8:cccc::/124"},
+	{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"},
+	{IPv4Prefix: "192.0.2.192/29", IPv6Prefix: "2001:db8:eeee:8::/62"},
+	{IPv4Prefix: "192.0.2.224/31", IPv6Prefix: "64:ff9b::/127"},
+}
+
+// RFC 7757 Section 4.2 (SHOULD): "An SIIT implementation SHOULD include a feature that ensures that hairpinned IPv6
+// traffic is supported."
+//
+// Documented deviation: there is no hairpinning. In RFC 7757 Appendix B.1, the intermediate IPv4 packet of Figure 8
+// (192.0.2.1 to 192.0.2.2) goes back to IPv6 with the source 64:ff9b::192.0.2.1. Here the source matches EAM #1, so
+// it becomes 2001:db8:aaaa::.
+func TestHairpinnedIPv4SourceUsesEAM(t *testing.T) {
+	source, destination := net.ParseIP("192.0.2.1").To4(), net.ParseIP("192.0.2.2").To4()
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, testTranslatorWithEAM(rfc7757Figure1), ipv4TCPPacketWithAddresses(t, defaultTTL, source, destination))
+	})
+
+	ip := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	if !ip.SrcIP.Equal(net.ParseIP("2001:db8:aaaa::")) || !ip.DstIP.Equal(net.ParseIP("2001:db8:bbbb::b")) {
+		t.Fatalf("translated to %s -> %s, want 2001:db8:aaaa:: -> 2001:db8:bbbb::b", ip.SrcIP, ip.DstIP)
 	}
 }
 

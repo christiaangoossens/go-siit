@@ -40,10 +40,48 @@ func requireQuotedTCPv4(t *testing.T, quote gopacket.Packet, source, destination
 	}
 }
 
+// withIPv6FlowFields returns a copy of an IPv6 packet with another Traffic Class and Flow Label (no checksum covers them).
+func withIPv6FlowFields(t *testing.T, packet gopacket.Packet, trafficClass uint8, flowLabel uint32) gopacket.Packet {
+	t.Helper()
+
+	data := append([]byte(nil), packet.Data()...)
+	binary.BigEndian.PutUint32(data[0:4], 6<<28|uint32(trafficClass)<<20|flowLabel&0xfffff)
+
+	return gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default)
+}
+
+// quotedEchoIPv4 builds an ICMPv4 Echo Request (8) or Reply (0) from ipv4Source to ipv4Dest, to be quoted in an error.
+func quotedEchoIPv4(t *testing.T, echoType uint8) []byte {
+	t.Helper()
+
+	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: quoteTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(echoType, 0), Id: 1, Seq: 2}
+
+	return serializeTestPacket(t, ip, icmp, gopacket.Payload(segmentPayload))
+}
+
+// quotedEchoIPv6 builds an ICMPv6 Echo Request (128) or Reply (129) from ipv6Source to ipv6Dest, to be quoted in an error.
+func quotedEchoIPv6(t *testing.T, echoType uint8) []byte {
+	t.Helper()
+
+	ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: quoteTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(echoType, 0)}
+	if err := icmp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatal(err)
+	}
+
+	return serializeTestPacket(t, ip, icmp, &layers.ICMPv6Echo{Identifier: 1, SeqNumber: 2}, gopacket.Payload(segmentPayload))
+}
+
 // RFC 7915 Section 4.2 (MUST): "all ICMPv4 packets MUST have the Type translated and, for ICMPv4 error messages, the
 // included IP header also MUST be translated."
 //
-// Types without an ICMPv6 equivalent are dropped.
+// RFC 7915 Section 4.1: "it needs to decrement either the IPv4 TTL (before the translation) or the IPv6 Hop Limit
+// (after the translation)"
+//
+// RFC 7915 Section 4.1: "By default, copied from the IP Type Of Service (TOS) octet."
+//
+// Types without an ICMPv6 equivalent are dropped. The outer header is translated like any other packet.
 func TestTranslateICMPv4Messages(t *testing.T) {
 	const drop = 255
 	tests := []struct {
@@ -77,10 +115,12 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 		{name: "parameter problem bad length", icmpType: 12, code: 2, wantType: 4, wantCode: 0},
 		{name: "parameter problem missing option", icmpType: 12, code: 1, wantType: drop},
 		{name: "parameter problem code 3", icmpType: 12, code: 3, wantType: drop},
+		{name: "parameter problem code 6", icmpType: 12, code: 6, wantType: drop},
 		{name: "source quench", icmpType: 4, code: 0, wantType: drop},
 		{name: "redirect for network", icmpType: 5, code: 0, wantType: drop},
 		{name: "redirect for host", icmpType: 5, code: 1, wantType: drop},
 		{name: "alternate host address", icmpType: 6, code: 0, wantType: drop},
+		{name: "unassigned type 7", icmpType: 7, code: 0, wantType: drop},
 		{name: "router advertisement", icmpType: 9, code: 0, wantType: drop},
 		{name: "router solicitation", icmpType: 10, code: 0, wantType: drop},
 		{name: "timestamp request", icmpType: 13, code: 0, wantType: drop},
@@ -90,12 +130,14 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 		{name: "address mask request", icmpType: 17, code: 0, wantType: drop},
 		{name: "address mask reply", icmpType: 18, code: 0, wantType: drop},
 		{name: "unassigned type 34", icmpType: 34, code: 0, wantType: drop},
+		{name: "extended echo request", icmpType: 42, code: 0, wantType: drop},
+		{name: "extended echo reply", icmpType: 43, code: 0, wantType: drop},
 		{name: "unknown type 255", icmpType: 255, code: 0, wantType: drop},
 	}
 	quote := ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, quoteTTL).Data()
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			input := ipv4ICMPPacket(t, test.icmpType, test.code, quote)
+			input := withTOS(t, ipv4ICMPPacket(t, test.icmpType, test.code, quote), testTrafficClass)
 			if test.wantType == drop {
 				result, err := translateIPv4(t, testTranslator(), input)
 				requireDropped(t, result, err)
@@ -109,6 +151,11 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 			if !result.ip.SrcIP.Equal(ipv4TranslatedDest) || !result.ip.DstIP.Equal(ipv4TranslatedSource) {
 				t.Fatalf("outer addresses %s -> %s", result.ip.SrcIP, result.ip.DstIP)
 			}
+
+			if result.ip.HopLimit != defaultTTL-1 || result.ip.TrafficClass != testTrafficClass || result.ip.FlowLabel != 0 {
+				t.Fatalf("outer Hop Limit %d, Traffic Class %#x, Flow Label %#x, want %d, %#x, 0", result.ip.HopLimit, result.ip.TrafficClass, result.ip.FlowLabel, defaultTTL-1, testTrafficClass)
+			}
+
 			requireQuotedTCPv6(t, result.quote(t), ipv4TranslatedSource, ipv4TranslatedDest, quoteTTL)
 		})
 	}
@@ -119,7 +166,16 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 //
 // RFC 4443 Section 3.2, Packet Too Big Code: "Set to 0 (zero) by the originator and ignored by the receiver"
 //
+// RFC 7915 Section 5.2: "The Code is unchanged."
+//
+// RFC 7915 Section 5.1: "By default, copied from the IPv6 Traffic Class (all 8 bits)."
+//
+// RFC 7915 Section 5.1: "If the size of the translated IPv4 packet is less than or equal to 1260 bytes, it is set to
+// zero"
+//
 // Types without an ICMPv4 equivalent are dropped. The rows "packet too big with code 1 / 255" are regression guards: such a message used to be rejected.
+// A Time Exceeded keeps any code, also one that ICMPv4 does not define. A translated error is at most 576 octets, so
+// its DF flag is always clear.
 func TestTranslateICMPv6Messages(t *testing.T) {
 	const drop = 255
 	tests := []struct {
@@ -143,6 +199,7 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 		{name: "packet too big with code 255", icmpType: 2, code: 255, rest: icmpPointer(1280), wantType: 3, wantCode: 4},
 		{name: "hop limit exceeded in transit", icmpType: 3, code: 0, wantType: 11, wantCode: 0},
 		{name: "fragment reassembly time exceeded", icmpType: 3, code: 1, wantType: 11, wantCode: 1},
+		{name: "time exceeded code 2", icmpType: 3, code: 2, wantType: 11, wantCode: 2},
 		{name: "erroneous header field", icmpType: 4, code: 0, rest: icmpPointer(6), wantType: 12, wantCode: 0},
 		{name: "unrecognized next header", icmpType: 4, code: 1, rest: icmpPointer(40), wantType: 3, wantCode: 2},
 		{name: "unrecognized option", icmpType: 4, code: 2, rest: icmpPointer(40), wantType: drop},
@@ -160,6 +217,8 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 		{name: "neighbor advertisement", icmpType: layers.ICMPv6TypeNeighborAdvertisement, wantType: drop},
 		{name: "redirect", icmpType: layers.ICMPv6TypeRedirect, wantType: drop},
 		{name: "unassigned informational type 144", icmpType: 144, wantType: drop},
+		{name: "extended echo request", icmpType: 160, wantType: drop},
+		{name: "extended echo reply", icmpType: 161, wantType: drop},
 		{name: "unknown type 200", icmpType: 200, wantType: drop},
 		{name: "unknown type 255", icmpType: 255, wantType: drop},
 	}
@@ -170,7 +229,7 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 			if rest == nil {
 				rest = zeroRestHeader()
 			}
-			input := ipv6ICMPPacketWithRestHeader(t, test.icmpType, test.code, rest, quote)
+			input := withIPv6FlowFields(t, ipv6ICMPPacketWithRestHeader(t, test.icmpType, test.code, rest, quote), testTrafficClass, 0x12345)
 			if test.wantType == drop {
 				result, err := translateIPv6(t, testTranslator(), input)
 				requireDropped(t, result, err)
@@ -183,6 +242,11 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 			if !result.ip.SrcIP.Equal(ipv4Source) || !result.ip.DstIP.Equal(ipv6TranslatedSource) {
 				t.Fatalf("outer addresses %s -> %s", result.ip.SrcIP, result.ip.DstIP)
 			}
+
+			if result.ip.TTL != defaultTTL-1 || result.ip.TOS != testTrafficClass || result.ip.Flags != 0 {
+				t.Fatalf("outer TTL %d, TOS %#x, flags %v, want %d, %#x, none", result.ip.TTL, result.ip.TOS, result.ip.Flags, defaultTTL-1, testTrafficClass)
+			}
+
 			requireQuotedTCPv4(t, result.quote(), ipv6TranslatedSource, ipv4Source, quoteTTL)
 		})
 	}
@@ -219,7 +283,15 @@ func ipv4FragmentPacket(t *testing.T, flags layers.IPv4Flag, offset uint16, payl
 // RFC 7915 Sections 4.3 and 5.3 (MUST): "The ICMP error messages containing the packet in error MUST be translated
 // just like a normal IP packet"
 //
-// A quote cut off after the first eight transport octets (RFC 792) keeps the length of the original packet.
+// RFC 7915 Section 4.2: "Adjust the Type values to 128 and 129, respectively"
+//
+// RFC 7915 Section 5.2: "Adjust the Type values to 8 and 0, respectively"
+//
+// A quote cut off after the first eight transport octets (RFC 792) keeps the length of the original packet. A quoted
+// Echo gets the type of the other family and a valid checksum, like an Echo that is not quoted.
+//
+// A quoted UDP checksum of zero stays zero. This is a local choice: RFC 7915 does not cover it, and without the whole
+// datagram no checksum can be computed.
 func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 	t.Run("IPv4 quote with options", func(t *testing.T) {
 		quote := ipv4TCPPacketWithOptions(t, ipv4NOP, ipv4NOP, ipv4NOP, ipv4NOP).Data()
@@ -264,6 +336,57 @@ func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 			t.Fatalf("quoted Payload Length is %d, want %d", length, len(original)-ipv4HeaderLength)
 		}
 	})
+	t.Run("IPv4 quote of only a header", func(t *testing.T) {
+		quote := serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: quoteTTL, Protocol: layers.IPProtocolTCP, SrcIP: ipv4Source, DstIP: ipv4Dest})
+		data := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, 3, 3, quote)).quote(t).Data()
+		if len(data) != ipv6HeaderLength || binary.BigEndian.Uint16(data[4:6]) != 0 || data[6] != byte(layers.IPProtocolTCP) ||
+			!bytes.Equal(data[8:24], ipv4TranslatedSource) || !bytes.Equal(data[24:40], ipv4TranslatedDest) {
+			t.Fatalf("quoted IPv4 header was not translated to an IPv6 header with Payload Length 0: %x", data)
+		}
+	})
+	t.Run("IPv4 quote of UDP", func(t *testing.T) {
+		quote := ipv4Segment(t, segmentUDP, ipv4Source, ipv4Dest, quoteTTL).Data()
+		got := translateToICMPv6(t, testTranslatorWithEAM(eamTable), ipv4ICMPPacket(t, 3, 3, quote)).quote(t)
+		ip, ok := got.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+		udp, ok2 := got.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		if !ok || !ok2 || !ip.SrcIP.Equal(eamHost1) || !ip.DstIP.Equal(eamHost2) || !bytes.Equal(udp.Payload, segmentPayload) {
+			t.Fatalf("quoted UDP datagram was not translated: %v", got.ErrorLayer())
+		}
+
+		if udp.Checksum == 0 || udp.Checksum != recalculatedUDPChecksum(t, ip, udp) {
+			t.Fatalf("quoted UDP checksum %#x is not valid for the IPv6 pseudo-header", udp.Checksum)
+		}
+	})
+	t.Run("IPv4 quote of UDP without checksum", func(t *testing.T) {
+		quote := zeroUDPChecksum(t, ipv4Segment(t, segmentUDP, ipv4Source, ipv4Dest, quoteTTL), ipv4HeaderLength)
+		got := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, 3, 3, quote)).quote(t)
+		udp, ok := got.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		if !ok || udp.Checksum != 0 || !bytes.Equal(udp.Payload, segmentPayload) {
+			t.Fatalf("quoted UDP datagram without checksum was not kept as is: %+v", udp)
+		}
+	})
+	for _, echo := range []struct{ v4Type, v6Type uint8 }{{echoRequest, layers.ICMPv6TypeEchoRequest}, {echoReply, layers.ICMPv6TypeEchoReply}} {
+		t.Run(fmt.Sprintf("IPv4 quote of ICMPv4 type %d", echo.v4Type), func(t *testing.T) {
+			got := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, 3, 3, quotedEchoIPv4(t, echo.v4Type))).quote(t)
+			ip, ok := got.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+			icmp, ok2 := got.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+			if !ok || !ok2 || ip.NextHeader != layers.IPProtocolICMPv6 || icmp.TypeCode != layers.CreateICMPv6TypeCode(echo.v6Type, 0) {
+				t.Fatalf("quoted Echo was not translated to ICMPv6 type %d: %v", echo.v6Type, got.ErrorLayer())
+			}
+
+			if icmp.Checksum != recalculatedICMPv6Checksum(t, ip, icmp) || !bytes.Equal(icmp.Payload, cat([]byte{0, 1, 0, 2}, segmentPayload)) {
+				t.Fatalf("quoted Echo has checksum %#x and data %x, want a valid checksum and unchanged data", icmp.Checksum, icmp.Payload)
+			}
+		})
+	}
+	t.Run("IPv4 quote with a TOS", func(t *testing.T) {
+		quote := withTOS(t, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, quoteTTL), 0xb8).Data()
+		got := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, 3, 3, quote)).quote(t)
+		ip, ok := got.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+		if !ok || ip.TrafficClass != 0xb8 || ip.FlowLabel != 0 {
+			t.Fatalf("quoted IPv6 header is %+v, want Traffic Class 0xb8 and Flow Label 0", ip)
+		}
+	})
 	t.Run("IPv6 quote with extension headers", func(t *testing.T) {
 		segment := ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, quoteTTL).Data()[ipv6HeaderLength:]
 		// A Routing header with Segments Left is fine inside a quote: the quoted packet is not routed.
@@ -293,13 +416,74 @@ func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 			t.Fatalf("quoted Total Length is %d, want %d", length, len(original)-ipv6HeaderLength+ipv4HeaderLength)
 		}
 	})
+	t.Run("IPv6 quote of only a header", func(t *testing.T) {
+		quote := serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolTCP, HopLimit: quoteTTL, SrcIP: ipv6Source, DstIP: ipv6Dest})
+		data := translateToICMPv4(t, testTranslator(), ipv6ICMPPacket(t, 1, 4, quote)).icmp.Payload
+		if len(data) != ipv4HeaderLength || binary.BigEndian.Uint16(data[2:4]) != ipv4HeaderLength || data[9] != byte(layers.IPProtocolTCP) ||
+			!bytes.Equal(data[12:16], ipv6TranslatedSource.To4()) || !bytes.Equal(data[16:20], ipv6TranslatedDest.To4()) {
+			t.Fatalf("quoted IPv6 header was not translated to an IPv4 header with Total Length 20: %x", data)
+		}
+	})
+	t.Run("IPv6 quote of UDP", func(t *testing.T) {
+		quote := ipv6Segment(t, segmentUDP, eamHost1, eamHost2, quoteTTL).Data()
+		input := ipv6ICMPErrorPacket(t, eamHost2, eamHost1, icmpv6DestUnreachable, 4, zeroRestHeader(), quote)
+		got := translateToICMPv4(t, testTranslatorWithEAM(eamTable), input).quote()
+		ip, ok := got.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+		udp, ok2 := got.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		if !ok || !ok2 || !ip.SrcIP.Equal(ipv4Source) || !ip.DstIP.Equal(ipv4Dest) || !bytes.Equal(udp.Payload, segmentPayload) {
+			t.Fatalf("quoted UDP datagram was not translated: %v", got.ErrorLayer())
+		}
+
+		if udp.Checksum == 0 || udp.Checksum != recalculatedUDPChecksum(t, ip, udp) {
+			t.Fatalf("quoted UDP checksum %#x is not valid for the IPv4 pseudo-header", udp.Checksum)
+		}
+	})
+	t.Run("IPv6 quote of UDP without checksum", func(t *testing.T) {
+		quote := zeroUDPChecksum(t, ipv6Segment(t, segmentUDP, ipv6Source, ipv6Dest, quoteTTL), ipv6HeaderLength)
+		got := translateToICMPv4(t, testTranslator(), ipv6ICMPPacket(t, 1, 4, quote)).quote()
+		udp, ok := got.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		if !ok || udp.Checksum != 0 || !bytes.Equal(udp.Payload, segmentPayload) {
+			t.Fatalf("quoted UDP datagram without checksum was not kept as is: %+v", udp)
+		}
+	})
+	for _, echo := range []struct{ v6Type, v4Type uint8 }{{layers.ICMPv6TypeEchoRequest, echoRequest}, {layers.ICMPv6TypeEchoReply, echoReply}} {
+		t.Run(fmt.Sprintf("IPv6 quote of ICMPv6 type %d", echo.v6Type), func(t *testing.T) {
+			got := translateToICMPv4(t, testTranslator(), ipv6ICMPPacket(t, 1, 4, quotedEchoIPv6(t, echo.v6Type))).quote()
+			ip, ok := got.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+			icmp, ok2 := got.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+			if !ok || !ok2 || ip.Protocol != layers.IPProtocolICMPv4 || icmp.TypeCode != layers.CreateICMPv4TypeCode(echo.v4Type, 0) {
+				t.Fatalf("quoted Echo was not translated to ICMPv4 type %d: %v", echo.v4Type, got.ErrorLayer())
+			}
+
+			if icmp.Checksum != recalculatedICMPv4Checksum(t, icmp) || icmp.Id != 1 || icmp.Seq != 2 || !bytes.Equal(icmp.Payload, segmentPayload) {
+				t.Fatalf("quoted Echo has checksum %#x, id %d, seq %d and data %x, want a valid checksum and unchanged fields", icmp.Checksum, icmp.Id, icmp.Seq, icmp.Payload)
+			}
+		})
+	}
+	t.Run("IPv6 quote with a Traffic Class and Flow Label", func(t *testing.T) {
+		quote := withIPv6FlowFields(t, ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, quoteTTL), 0xb8, 0xfffff).Data()
+		got := translateToICMPv4(t, testTranslator(), ipv6ICMPPacket(t, 1, 4, quote)).quote()
+		ip, ok := got.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+		if !ok || ip.TOS != 0xb8 {
+			t.Fatalf("quoted IPv4 header is %+v, want TOS 0xb8", ip)
+		}
+	})
 }
 
 // RFC 7915 Sections 4.3 and 5.3 (MUST): "This process MUST stop at the first embedded header and drop the packet if
 // it contains more embedded headers."
 //
+// RFC 7915 Section 4.1 (MUST): "if an unexpired source route option is present, then the packet MUST instead be
+// discarded"
+//
+// RFC 6052 Section 3.1 (MUST): "they MUST drop these packets."
+//
 // A quote that is not a valid IP packet is dropped as well, and so is one with an illegal address, which would
 // otherwise be embedded in the translated message.
+//
+// A quote is translated just like a normal IP packet (RFC 7915 Section 4.3), so the rules for a packet apply to it: a
+// quote with an unexpired source route, a non-global address under the Well-Known Prefix, the ICMP protocol number of
+// the other family or an IPv6 extension header as IPv4 protocol is dropped together with its ICMP error.
 func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	nsp := translatorWithPrefix(t, "2001:db8:64::/96", nil)
 	translateV4 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
@@ -308,6 +492,13 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	translateV6 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
 		return translateIPv6(t, translator, ipv6ICMPPacket(t, 1, 4, quote))
 	}
+	ipv4QuoteWithProtocol := func(protocol layers.IPProtocol, payload []byte) []byte {
+		return serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: protocol, SrcIP: ipv4Source, DstIP: ipv4Dest}, gopacket.Payload(payload))
+	}
+	extensionPayload := cat(optionsHeader(layers.IPProtocolTCP), ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()[ipv4HeaderLength:])
+	icmpv6Echo := quotedEchoIPv6(t, layers.ICMPv6TypeEchoRequest)[ipv6HeaderLength:]
+	icmpv4Echo := quotedEchoIPv4(t, echoRequest)[ipv4HeaderLength:]
+	ipv6QuoteOfICMPv4 := serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv4, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}, gopacket.Payload(icmpv4Echo))
 	tests := []struct {
 		name       string
 		translator *siit.Translator
@@ -330,12 +521,67 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 		{"IPv6 quote with an unmappable source", testTranslator(), translateV6, ipv6Segment(t, segmentTCP, ipv6Unmappable, ipv6Dest, defaultTTL).Data()},
 		{"IPv6 quote with an unmappable destination", testTranslator(), translateV6, ipv6Segment(t, segmentTCP, ipv6Source, ipv6Unmappable, defaultTTL).Data()},
 		{"IPv6 quote embedding an illegal IPv4 address (WKP)", testTranslator(), translateV6, ipv6Segment(t, segmentTCP, ipv6Source, net.ParseIP("64:ff9b::7f00:1"), defaultTTL).Data()},
+		{"IPv4 quote with a non-global destination (WKP)", testTranslator(), translateV4, ipv4Segment(t, segmentTCP, ipv4Source, net.ParseIP("192.168.0.1").To4(), defaultTTL).Data()},
+		{"IPv6 quote embedding a non-global IPv4 address (WKP)", testTranslator(), translateV6, ipv6Segment(t, segmentTCP, net.ParseIP("64:ff9b::a01:203"), ipv6Dest, defaultTTL).Data()},
+		{"IPv4 quote with an unexpired source route", testTranslator(), translateV4, ipv4TCPPacketWithOptions(t, sourceRoute(131, 4), ipv4NOP).Data()},
+		{"IPv4 quote of protocol 58", testTranslator(), translateV4, ipv4QuoteWithProtocol(layers.IPProtocolICMPv6, icmpv6Echo)},
+		{"IPv6 quote of Next Header 1", testTranslator(), translateV6, ipv6QuoteOfICMPv4},
+		{"IPv4 quote of protocol 0", testTranslator(), translateV4, ipv4QuoteWithProtocol(layers.IPProtocolIPv6HopByHop, extensionPayload)},
+		{"IPv4 quote of protocol 43", testTranslator(), translateV4, ipv4QuoteWithProtocol(layers.IPProtocolIPv6Routing, extensionPayload)},
+		{"IPv4 quote of protocol 44", testTranslator(), translateV4, ipv4QuoteWithProtocol(layers.IPProtocolIPv6Fragment, extensionPayload)},
+		{"IPv4 quote of protocol 60", testTranslator(), translateV4, ipv4QuoteWithProtocol(layers.IPProtocolIPv6Destination, extensionPayload)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := test.translate(t, test.translator, test.quote)
 			if result.packet != nil {
 				t.Fatalf("ICMP error with an invalid quote was translated: err=%v", err)
+			}
+		})
+	}
+}
+
+// RFC 7915 Section 4.1 (SHOULD): "If the translator gets an illegal source address (e.g., 0.0.0.0, 127.0.0.1, etc.),
+// the translator SHOULD silently discard the packet"
+//
+// RFC 7915 Section 4.1: "source address will be translated for the purpose of trouble shooting"
+//
+// Pinned local policy: an ICMPv4 error from an illegal source is dropped without a reply all the same, and so is one
+// from a non-global source under the Well-Known Prefix (RFC 6052 Section 3.1). A Network-Specific Prefix may embed a
+// non-global source.
+func TestTranslateICMPv4ErrorFromIllegalSource(t *testing.T) {
+	nsp := translatorWithPrefix(t, "2001:db8:64::/96", nil)
+	tests := []struct {
+		name       string
+		translator *siit.Translator
+		source     string
+		want       net.IP // nil: dropped with ErrUnsupportedSrcIP
+	}{
+		{name: "loopback (WKP)", translator: testTranslator(), source: "127.0.0.1"},
+		{name: "unspecified (WKP)", translator: testTranslator(), source: "0.0.0.0"},
+		{name: "private (WKP)", translator: testTranslator(), source: "10.0.0.1"},
+		{name: "loopback (NSP)", translator: nsp, source: "127.0.0.1"},
+		{name: "unspecified (NSP)", translator: nsp, source: "0.0.0.0"},
+		{name: "private (NSP)", translator: nsp, source: "10.0.0.1", want: net.ParseIP("2001:db8:64::a00:1")},
+	}
+	quote := ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: net.ParseIP(test.source).To4(), DstIP: ipv4Source}
+			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(icmpv4TimeExceeded, 0)}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(quote)), layers.LayerTypeIPv4, gopacket.Default)
+			if test.want != nil {
+				result := translateToICMPv6(t, test.translator, input)
+				if !result.ip.SrcIP.Equal(test.want) {
+					t.Fatalf("outer source %s, want %s", result.ip.SrcIP, test.want)
+				}
+
+				return
+			}
+
+			result, err := translateIPv4(t, test.translator, input)
+			if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.packet != nil || result.reply != nil {
+				t.Fatalf("got err=%v, packet length %d, reply length %d, want ErrUnsupportedSrcIP without a packet or reply", err, len(result.packet), len(result.reply))
 			}
 		})
 	}
@@ -431,12 +677,19 @@ func TestTranslateFragmentationNeededMTU(t *testing.T) {
 // RFC 7915 Section 5.2 (MUST): "The MTU field MUST be adjusted for the difference between the IPv4 and IPv6 header
 // sizes"
 //
+// RFC 7915 Section 5.2: "taking into account whether or not the packet in error includes a Fragment Header"
+//
 // The MTU is also limited by the translator's own IPv6 MTU, because the IPv4 side cannot take more than that either.
+// The formula that follows that phrase in RFC 7915 subtracts only 20. This test reads the phrase as: a quoted Fragment
+// header is 8 octets that the IPv4 packet does not carry, so 28 octets are subtracted then.
 func TestTranslatePacketTooBigMTU(t *testing.T) {
+	fragment := []byte{byte(layers.IPProtocolTCP), 0, 0, 1, 0, 0, 0x43, 0x21}
+	quotedFragment := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Fragment, fragment, bytes.Repeat([]byte{7}, 32)).Data()
 	for _, test := range []struct {
 		name          string
 		translatorMTU uint32
 		mtu           uint32
+		quote         []byte // nil: an unfragmented TCP packet
 		want          uint16
 	}{
 		{name: "minimum IPv6 MTU", translatorMTU: 1280, mtu: 1280, want: 1260},
@@ -446,9 +699,15 @@ func TestTranslatePacketTooBigMTU(t *testing.T) {
 		{name: "larger than the configured MTU", translatorMTU: 1500, mtu: 9000, want: 1480},
 		{name: "smaller than the configured MTU", translatorMTU: 1500, mtu: 1400, want: 1380},
 		{name: "huge", translatorMTU: 1500, mtu: 0xffffffff, want: 1480},
+		{name: "quote with a Fragment header", translatorMTU: 1500, mtu: 1400, quote: quotedFragment, want: 1372},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypePacketTooBig, 0, icmpPointer(test.mtu), ipv6TCPPacket(t, defaultTTL).Data())
+			quote := test.quote
+			if quote == nil {
+				quote = ipv6TCPPacket(t, defaultTTL).Data()
+			}
+
+			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypePacketTooBig, 0, icmpPointer(test.mtu), quote)
 			result := translateToICMPv4(t, translatorWithMTU(t, test.translatorMTU), input)
 			if result.icmp.TypeCode != layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 4) || result.icmp.Seq != test.want {
 				t.Fatalf("got %v with MTU %d, want Fragmentation Needed with MTU %d", result.icmp.TypeCode, result.icmp.Seq, test.want)

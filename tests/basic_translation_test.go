@@ -48,18 +48,27 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 		}
 	}
 
+	// The threshold applies to the IPv4 packet, after the extension headers are removed.
+	extensionHeaders := cat(optionsHeader(layers.IPProtocolIPv6Destination), optionsHeader(layers.IPProtocolGRE))
 	for _, test := range []struct {
 		name       string
+		headers    []byte
 		payloadLen int
 		wantDF     bool
 	}{
 		{name: "at threshold", payloadLen: maxIPv4PacketLength - ipv4HeaderLength, wantDF: false},
 		{name: "above threshold", payloadLen: maxIPv4PacketLength + 1 - ipv4HeaderLength, wantDF: true},
 		{name: "minimum", payloadLen: 8, wantDF: false},
+		{name: "at threshold after extension headers", headers: extensionHeaders, payloadLen: maxIPv4PacketLength - ipv4HeaderLength, wantDF: false},
+		{name: "above threshold after extension headers", headers: extensionHeaders, payloadLen: maxIPv4PacketLength + 1 - ipv4HeaderLength, wantDF: true},
 	} {
 		t.Run("IPv6 to IPv4 DF "+test.name, func(t *testing.T) {
-			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
-			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.payloadLen))), layers.LayerTypeIPv6, gopacket.Default)
+			first := layers.IPProtocolGRE
+			if test.headers != nil {
+				first = layers.IPProtocolIPv6HopByHop
+			}
+
+			input := ipv6PacketWithHeaders(t, first, test.headers, bytes.Repeat([]byte{0xab}, test.payloadLen))
 			result := mustTranslate(t, func() (translation, error) {
 				return translateIPv6(t, testTranslator(), input)
 			})
@@ -69,6 +78,21 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 			}
 		})
 	}
+
+	// The Flow Label has no IPv4 equivalent and changes nothing; the Traffic Class is still copied.
+	t.Run("IPv6 to IPv4 flow label 0xfffff traffic class 0xb8", func(t *testing.T) {
+		input := ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, defaultTTL)
+
+		result := translateToIPv4Packet(t, withIPv6FlowFields(t, input, 0xb8, 0xfffff))
+		reference := translateToIPv4Packet(t, withIPv6FlowFields(t, input, 0xb8, 0))
+
+		if tos := result.Layer(layers.LayerTypeIPv4).(*layers.IPv4).TOS; tos != 0xb8 {
+			t.Fatalf("TOS %#x, want 0xb8", tos)
+		}
+		if !bytes.Equal(withoutIdentification(result.Data()), withoutIdentification(reference.Data())) {
+			t.Fatal("the Flow Label changed the translated packet")
+		}
+	})
 
 	// The DF bit of an unfragmented IPv4 packet has no IPv6 equivalent: neither value produces a Fragment header.
 	for _, flags := range []layers.IPv4Flag{0, layers.IPv4DontFragment} {
