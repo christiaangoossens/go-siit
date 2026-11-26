@@ -35,8 +35,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 			t.Run(fmt.Sprintf("IPv6 to IPv4 traffic class %#x hop limit %d", tos, ttl), func(t *testing.T) {
 				data := append([]byte(nil), ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, ttl).Data()...)
 				data[0], data[1] = 0x60|tos>>4, data[1]&0x0f|tos<<4
-				result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default), siit.TranslationOverrides{})
+				result := mustTranslate(t, func() (translation, error) {
+					return translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
 				})
 				ip := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 				if ip.TOS != tos || ip.TTL != ttl-1 || ip.Protocol != layers.IPProtocolTCP || ip.IHL != 5 || ip.Flags != 0 || ip.FragOffset != 0 {
@@ -61,8 +61,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 		t.Run("IPv6 to IPv4 DF "+test.name, func(t *testing.T) {
 			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.payloadLen))), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv6(t, testTranslator(), input)
 			})
 			translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if gotDF := translated.Flags&layers.IPv4DontFragment != 0; gotDF != test.wantDF || translated.Length != uint16(ipv4HeaderLength+test.payloadLen) {
@@ -76,8 +76,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 		t.Run(fmt.Sprintf("IPv4 to IPv6 flags %v", flags), func(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Id: 0x1234, Flags: flags, Protocol: layers.IPProtocolGRE, SrcIP: ipv4Source, DstIP: ipv4Dest}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 16))), layers.LayerTypeIPv4, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv4(t, testTranslator(), input)
 			})
 			if translated := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6); translated.NextHeader != layers.IPProtocolGRE || len(result) != ipv6HeaderLength+16 {
 				t.Fatalf("unfragmented packet was translated with a Fragment header: %+v", translated)
@@ -88,8 +88,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 
 func translateIPv4Raw(t *testing.T, data []byte) gopacket.Packet {
 	t.Helper()
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default), siit.TranslationOverrides{})
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
 	})
 	return gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 }
@@ -141,8 +141,8 @@ func TestTranslateTransportPayloads(t *testing.T) {
 
 func translateToIPv4Packet(t *testing.T, input gopacket.Packet) gopacket.Packet {
 	t.Helper()
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, testTranslator(), input)
 	})
 	return gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
 }
@@ -185,15 +185,15 @@ func TestTranslateEnforcesMTU(t *testing.T) {
 					payload := bytes.Repeat([]byte{0xab}, test.size-ipv4HeaderLength-udpHeaderLength)
 					input = gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 				}
-				result, err := translatorWithMTU(t, mtu).TranslateIPv4(input, siit.TranslationOverrides{})
+				result, err := translateIPv4(t, translatorWithMTU(t, mtu), input)
 				if test.wantError {
-					if !errors.Is(err, siit.ErrPacketOversized) || result.Packet != nil {
-						t.Fatalf("oversized IPv4 packet was not rejected with ErrPacketOversized: result length=%d err=%v", len(result.Packet), err)
+					if !errors.Is(err, siit.ErrPacketOversized) || result.packet != nil {
+						t.Fatalf("oversized IPv4 packet was not rejected with ErrPacketOversized: result length=%d err=%v", len(result.packet), err)
 					}
 					return
 				}
-				if err != nil || len(result.Packet) != int(mtu) {
-					t.Fatalf("maximum IPv4 packet was not translated to a full-size IPv6 packet: result length=%d err=%v", len(result.Packet), err)
+				if err != nil || len(result.packet) != int(mtu) {
+					t.Fatalf("maximum IPv4 packet was not translated to a full-size IPv6 packet: result length=%d err=%v", len(result.packet), err)
 				}
 			})
 		}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	siit "github.com/christiaangoossens/go-siit"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -141,14 +140,14 @@ func TestTranslateDropsInvalidFragments(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var result siit.TranslatedPacket
+			var result translation
 			var err error
 			if test.v4 {
-				result, err = testTranslator().TranslateIPv4(test.packet, siit.TranslationOverrides{})
+				result, err = translateIPv4(t, testTranslator(), test.packet)
 			} else {
-				result, err = testTranslator().TranslateIPv6(test.packet, siit.TranslationOverrides{})
+				result, err = translateIPv6(t, testTranslator(), test.packet)
 			}
-			if result.Packet != nil {
+			if result.packet != nil {
 				t.Fatalf("packet was translated: err=%v", err)
 			}
 		})
@@ -195,7 +194,7 @@ func TestTranslateIPv4ZeroChecksumUDPFirstFragmentDropped(t *testing.T) {
 	binary.BigEndian.PutUint16(udp[2:4], dnsPort)
 	binary.BigEndian.PutUint16(udp[4:6], 100) // length of the whole datagram; checksum (octets 6-7) stays zero
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(udp)), layers.LayerTypeIPv4, gopacket.Default)
-	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+	result, err := translateIPv4(t, testTranslator(), input)
 	requireDropped(t, result, err)
 }
 
@@ -215,8 +214,8 @@ func TestTranslateFirstFragmentUpdatesChecksum(t *testing.T) {
 				ip.Protocol = layers.IPProtocolUDP
 			}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(fragmentSegment(t, kind, ip, content))), layers.LayerTypeIPv4, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return translator.TranslateIPv4(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv4(t, translator, input)
 			})
 			packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 			fragment, ok := packet.Layer(layers.LayerTypeIPv6Fragment).(*layers.IPv6Fragment)
@@ -233,8 +232,8 @@ func TestTranslateFirstFragmentUpdatesChecksum(t *testing.T) {
 			}
 			fragment := &layers.IPv6Fragment{NextHeader: next, MoreFragments: true, Identification: 0x01020304}
 			input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, fragmentSegment(t, kind, ip, content)), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return translator.TranslateIPv6(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv6(t, translator, input)
 			})
 			translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			requireFragmentChecksum(t, kind, translated, translated.Payload)

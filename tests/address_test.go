@@ -21,8 +21,8 @@ const (
 func requireAddressMapping(t *testing.T, translator *siit.Translator, ipv4, ipv6 net.IP, direction int) {
 	t.Helper()
 	if direction != ipv6ToIPv4Only {
-		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return translator.TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4), siit.TranslationOverrides{})
+		result := mustTranslate(t, func() (translation, error) {
+			return translateIPv4(t, translator, ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4))
 		})
 		ip := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 		if !ip.SrcIP.Equal(ipv6) || !ip.DstIP.Equal(ipv6) {
@@ -30,8 +30,8 @@ func requireAddressMapping(t *testing.T, translator *siit.Translator, ipv4, ipv6
 		}
 	}
 	if direction != ipv4ToIPv6Only {
-		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return translator.TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6, ipv6), siit.TranslationOverrides{})
+		result := mustTranslate(t, func() (translation, error) {
+			return translateIPv6(t, translator, ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6, ipv6))
 		})
 		ip := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 		if !ip.SrcIP.Equal(ipv4) || !ip.DstIP.Equal(ipv4) {
@@ -125,26 +125,26 @@ func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 		ipv4 := net.ParseIP(test.address).To4()
 		wellKnown := expectedMappedAddress(ipv4)
 		t.Run(test.address, func(t *testing.T) {
-			attempts := map[string]func() (siit.TranslatedPacket, error){
-				"IPv4 source": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4Dest), siit.TranslationOverrides{})
+			attempts := map[string]func() (translation, error){
+				"IPv4 source": func() (translation, error) {
+					return translateIPv4(t, testTranslator(), ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4Dest))
 				},
-				"IPv4 destination": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, ipv4), siit.TranslationOverrides{})
+				"IPv4 destination": func() (translation, error) {
+					return translateIPv4(t, testTranslator(), ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, ipv4))
 				},
-				"IPv6 source": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, wellKnown, ipv6Dest), siit.TranslationOverrides{})
+				"IPv6 source": func() (translation, error) {
+					return translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, defaultTTL, wellKnown, ipv6Dest))
 				},
-				"IPv6 destination": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, wellKnown), siit.TranslationOverrides{})
+				"IPv6 destination": func() (translation, error) {
+					return translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, wellKnown))
 				},
 			}
 			for name, attempt := range attempts {
 				result, err := attempt()
-				if test.global && result.Packet == nil {
+				if test.global && result.packet == nil {
 					t.Errorf("%s: global address was not translated: %v", name, err)
 				}
-				if !test.global && result.Packet != nil {
+				if !test.global && result.packet != nil {
 					t.Errorf("%s: non-global address in the Well-Known Prefix was translated", name)
 				}
 			}
@@ -164,7 +164,7 @@ func TestTranslateIPv6WithoutMappingIsRejected(t *testing.T) {
 		"destination": ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, ipv6Unmappable),
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, err := testTranslator().TranslateIPv6(packet, siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), packet)
 			requireRejected(t, result, err)
 		})
 	}

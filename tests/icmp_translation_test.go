@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	siit "github.com/christiaangoossens/go-siit"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -52,7 +51,7 @@ func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
 			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, 1), Id: 1, Seq: 1}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp), layers.LayerTypeIPv4, gopacket.Default)
-			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			result, err := translateIPv4(t, testTranslator(), input)
 			requireRejected(t, result, err)
 		})
 	}
@@ -64,7 +63,7 @@ func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
 				t.Fatal(err)
 			}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload([]byte{0, 1, 0, 1})), layers.LayerTypeIPv6, gopacket.Default)
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), input)
 			requireRejected(t, result, err)
 		})
 	}
@@ -86,7 +85,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 			t.Run(fmt.Sprintf("IPv4 code %d pointer %d", code, pointer), func(t *testing.T) {
 				input := ipv4ICMPPacketWithRest(t, layers.ICMPv4TypeParameterProblem, code, uint16(pointer)<<8, 0, ipv4TCPPacket(t, defaultTTL).Data())
 				if want == drop {
-					result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+					result, err := translateIPv4(t, testTranslator(), input)
 					requireDropped(t, result, err)
 					return
 				}
@@ -123,7 +122,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 		t.Run(fmt.Sprintf("IPv6 pointer %d", pointer), func(t *testing.T) {
 			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(uint32(pointer)), ipv6TCPPacket(t, defaultTTL).Data())
 			if want == drop {
-				result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+				result, err := translateIPv6(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -138,7 +137,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 	}
 	t.Run("IPv6 pointer past the packet", func(t *testing.T) {
 		input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(1000), ipv6TCPPacket(t, defaultTTL).Data())
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+		result, err := translateIPv6(t, testTranslator(), input)
 		requireDropped(t, result, err)
 	})
 }

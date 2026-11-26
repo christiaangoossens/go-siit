@@ -2,6 +2,7 @@ package siit_test
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 
@@ -127,26 +128,59 @@ func checksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func mustTranslate(t *testing.T, translate func() (siit.TranslatedPacket, error)) []byte {
+// translation is the outcome of translating one packet. Tests only read this type, so a change to the library's
+// result types only changes translateIPv4, translateIPv6 and newTranslation.
+type translation struct {
+	// Translated packet, nil when the packet is dropped or rejected.
+	packet []byte
+	// Addresses of the translated packet.
+	src, dst net.IP
+	// ICMP error generated for the sender of the packet, nil when there is none.
+	reply []byte
+}
+
+func translateIPv4(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
 	t.Helper()
-	packet, err := translate()
+	result, err := translator.TranslateIPv4(packet, siit.TranslationOverrides{})
+	return newTranslation(result, err), err
+}
+
+func translateIPv6(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
+	t.Helper()
+	result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
+	return newTranslation(result, err), err
+}
+
+func newTranslation(result siit.TranslatedPacket, err error) translation {
+	var reply []byte
+	var translationErr *siit.TranslationError
+	if errors.As(err, &translationErr) {
+		reply = translationErr.Packet
+	}
+
+	return translation{packet: result.Packet, src: result.SrcIP, dst: result.DstIP, reply: reply}
+}
+
+func mustTranslate(t *testing.T, translate func() (translation, error)) []byte {
+	t.Helper()
+	result, err := translate()
 	if err != nil {
 		t.Fatalf("translation failed: %v", err)
 	}
-	return packet.Packet
+	return result.packet
 }
 
-func requireDropped(t *testing.T, result siit.TranslatedPacket, err error) {
+func requireDropped(t *testing.T, result translation, err error) {
 	t.Helper()
-	if err != nil || result.Packet != nil {
-		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result.Packet), err)
+	if err != nil || result.packet != nil {
+		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result.packet), err)
 	}
 }
 
-func requireRejected(t *testing.T, result siit.TranslatedPacket, err error) {
+func requireRejected(t *testing.T, result translation, err error) {
 	t.Helper()
-	if err == nil || result.Packet != nil {
-		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result.Packet), err)
+	if err == nil || result.packet != nil {
+		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result.packet), err)
 	}
 }
 
@@ -508,8 +542,8 @@ type icmpv6Result struct {
 // translateToICMPv6 translates an IPv4 packet that must yield an ICMPv6 message with a valid checksum.
 func translateToICMPv6(t *testing.T, translator *siit.Translator, input gopacket.Packet) icmpv6Result {
 	t.Helper()
-	raw := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv4(input, siit.TranslationOverrides{})
+	raw := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, translator, input)
 	})
 	packet := gopacket.NewPacket(raw, layers.LayerTypeIPv6, gopacket.Default)
 	ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -537,8 +571,8 @@ type icmpv4Result struct {
 // translateToICMPv4 translates an IPv6 packet that must yield an ICMPv4 message with valid checksums.
 func translateToICMPv4(t *testing.T, translator *siit.Translator, input gopacket.Packet) icmpv4Result {
 	t.Helper()
-	raw := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
+	raw := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, translator, input)
 	})
 	packet := gopacket.NewPacket(raw, layers.LayerTypeIPv4, gopacket.Default)
 	ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)

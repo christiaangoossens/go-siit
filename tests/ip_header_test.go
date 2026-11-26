@@ -61,13 +61,13 @@ func TestTranslateIPv4Options(t *testing.T) {
 			if parsed := input.Layer(layers.LayerTypeIPv4).(*layers.IPv4); parsed.IHL <= 5 {
 				t.Fatalf("test packet does not carry IPv4 options: IHL=%d", parsed.IHL)
 			}
-			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			result, err := translateIPv4(t, testTranslator(), input)
 			if err != nil {
 				t.Fatalf("translation failed: %v", err)
 			}
 			if test.sourceFailed {
 				// Local API contract: the generated ICMPv4 error is returned in Packet with a nil error.
-				packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
+				packet := gopacket.NewPacket(result.packet, layers.LayerTypeIPv4, gopacket.Default)
 				outer, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 				if !ok || !outer.SrcIP.Equal(ipv4RouterAddress) || !outer.DstIP.Equal(ipv4Source) || outer.Protocol != layers.IPProtocolICMPv4 {
 					t.Fatalf("unexpected source-route error IPv4 header: %+v", outer)
@@ -82,15 +82,15 @@ func TestTranslateIPv4Options(t *testing.T) {
 				}
 				return
 			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
+			packet := gopacket.NewPacket(result.packet, layers.LayerTypeIPv6, gopacket.Default)
 			ip6, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 			if !ok || packet.ErrorLayer() != nil {
 				t.Fatalf("IPv4 option prevented translation: %v", packet.ErrorLayer())
 			}
 			// Payload Length is the IPv4 Total Length minus the IPv4 header *and* options (RFC 7915 Section 4.1),
 			// and no IPv6 extension header is produced for the options.
-			if ip6.NextHeader != layers.IPProtocolTCP || int(ip6.Length) != 20+len("opt") || len(result.Packet) != ipv6HeaderLength+20+len("opt") {
-				t.Fatalf("IPv4 options leaked into the IPv6 packet: next header %d, payload length %d, packet length %d", ip6.NextHeader, ip6.Length, len(result.Packet))
+			if ip6.NextHeader != layers.IPProtocolTCP || int(ip6.Length) != 20+len("opt") || len(result.packet) != ipv6HeaderLength+20+len("opt") {
+				t.Fatalf("IPv4 options leaked into the IPv6 packet: next header %d, payload length %d, packet length %d", ip6.NextHeader, ip6.Length, len(result.packet))
 			}
 			tcp, ok := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
 			if !ok || !bytes.Equal(tcp.Payload, []byte("opt")) || tcp.Checksum != recalculatedTCPChecksum(t, ip6, tcp) {
@@ -110,8 +110,8 @@ func TestTranslateIPv4ICMPErrorWithSourceRouteIsDroppedSilently(t *testing.T) {
 	}
 	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeDestinationUnreachable, 3)}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(ipv4TCPPacket(t, defaultTTL).Data())), layers.LayerTypeIPv4, gopacket.Default)
-	result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
-	if result.Packet != nil {
+	result, err := translateIPv4(t, testTranslator(), input)
+	if result.packet != nil || result.reply != nil {
 		t.Fatalf("ICMP error with a source route generated a reply: err=%v", err)
 	}
 }
@@ -159,12 +159,12 @@ func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			input := ipv6PacketWithHeaders(t, test.first, test.headers, segment)
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), input)
 			if test.pointer != 0 {
-				if err == nil || result.Packet == nil {
+				if err == nil || result.reply == nil {
 					t.Fatalf("routing header with segments left was not rejected with an ICMPv6 error: err=%v", err)
 				}
-				packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
+				packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv6, gopacket.Default)
 				icmp, ok := packet.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
 				if !ok || icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 0) {
 					t.Fatalf("wrong ICMPv6 error for routing header: %+v", icmp)
@@ -182,12 +182,12 @@ func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 			if err != nil {
 				t.Fatalf("translation failed: %v", err)
 			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
+			packet := gopacket.NewPacket(result.packet, layers.LayerTypeIPv4, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if !ok {
 				t.Fatalf("translated packet has no IPv4 layer: %v", packet.ErrorLayer())
 			}
-			if ip.Protocol != layers.IPProtocolTCP || ip.Length != uint16(len(result.Packet)) || ip.Checksum != ipv4HeaderChecksum(ip) {
+			if ip.Protocol != layers.IPProtocolTCP || ip.Length != uint16(len(result.packet)) || ip.Checksum != ipv4HeaderChecksum(ip) {
 				t.Fatalf("IPv6 extension headers were not removed from the IPv4 packet: %+v", ip)
 			}
 			translatedTCP, ok := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
@@ -211,8 +211,8 @@ func TestTranslateIPv6ICMPErrorWithSegmentsLeftIsDroppedSilently(t *testing.T) {
 	message := serializeTestPacket(t, icmp, gopacket.Payload(append(zeroRestHeader(), quote...)))
 	input := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Routing, routingHeader(layers.IPProtocolICMPv6, 1), message)
 	// The checksum covers the final destination, so recompute it for the packet as built.
-	result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-	if result.Packet != nil {
+	result, err := translateIPv6(t, testTranslator(), input)
+	if result.packet != nil || result.reply != nil {
 		t.Fatalf("ICMPv6 error behind a routing header generated a reply: err=%v", err)
 	}
 }
@@ -224,19 +224,15 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 		packet    []byte
 		layer     gopacket.LayerType
 		lengthAt  int
-		translate func(*siit.Translator, gopacket.Packet) (siit.TranslatedPacket, error)
+		translate func(*testing.T, *siit.Translator, gopacket.Packet) (translation, error)
 	}{
 		{
 			name: "IPv4 total length", packet: ipv4TCPPacket(t, defaultTTL).Data(), layer: layers.LayerTypeIPv4, lengthAt: 2,
-			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
-				return translator.TranslateIPv4(packet, siit.TranslationOverrides{})
-			},
+			translate: translateIPv4,
 		},
 		{
 			name: "IPv6 payload length", packet: ipv6TCPPacket(t, defaultTTL).Data(), layer: layers.LayerTypeIPv6, lengthAt: 4,
-			translate: func(translator *siit.Translator, packet gopacket.Packet) (siit.TranslatedPacket, error) {
-				return translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-			},
+			translate: translateIPv6,
 		},
 	}
 	for _, test := range tests {
@@ -244,7 +240,7 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 			packetBytes := append([]byte(nil), test.packet...)
 			binary.BigEndian.PutUint16(packetBytes[test.lengthAt:test.lengthAt+2], 1)
 			input := gopacket.NewPacket(packetBytes, test.layer, gopacket.Default)
-			if _, err := test.translate(testTranslator(), input); err == nil {
+			if _, err := test.translate(t, testTranslator(), input); err == nil {
 				t.Fatal("inconsistent payload length was accepted")
 			}
 		})
@@ -274,9 +270,9 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 				{"destination", ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, ip)},
 			} {
 				t.Run(fmt.Sprintf("%s/IPv4 %s %s", name, test.side, address), func(t *testing.T) {
-					result, err := translator.TranslateIPv4(test.packet, siit.TranslationOverrides{})
-					if err == nil || result.Packet != nil {
-						t.Fatalf("illegal IPv4 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.Packet), err)
+					result, err := translateIPv4(t, translator, test.packet)
+					if err == nil || result.packet != nil {
+						t.Fatalf("illegal IPv4 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.packet), err)
 					}
 				})
 			}
@@ -291,9 +287,9 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 				{"destination", ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, ip)},
 			} {
 				t.Run(fmt.Sprintf("%s/IPv6 %s %s", name, test.side, address), func(t *testing.T) {
-					result, err := translator.TranslateIPv6(test.packet, siit.TranslationOverrides{})
-					if err == nil || result.Packet != nil {
-						t.Fatalf("illegal IPv6 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.Packet), err)
+					result, err := translateIPv6(t, translator, test.packet)
+					if err == nil || result.packet != nil {
+						t.Fatalf("illegal IPv6 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.packet), err)
 					}
 				})
 			}
@@ -307,15 +303,14 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 func TestTranslateExpiredTTL(t *testing.T) {
 	for _, ttl := range []uint8{0, 1} {
 		t.Run(fmt.Sprintf("IPv4 TTL %d", ttl), func(t *testing.T) {
-			result, err := testTranslator().TranslateIPv4(ipv4TCPPacket(t, ttl), siit.TranslationOverrides{})
+			result, err := translateIPv4(t, testTranslator(), ipv4TCPPacket(t, ttl))
 			if !errors.Is(err, siit.ErrTimeExceeded) {
 				t.Fatalf("got error %v, want ErrTimeExceeded", err)
 			}
-			translationErr, ok := err.(*siit.TranslationError)
-			if !ok || !bytes.Equal(translationErr.Packet, result.Packet) {
-				t.Fatalf("TranslationError.Packet does not match returned packet: %T", err)
+			if result.reply == nil {
+				t.Fatalf("no Time Exceeded reply was generated: %T", err)
 			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv6, gopacket.Default)
+			packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv6, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 			if !ok || ip.NextHeader != layers.IPProtocolICMPv6 || !ip.DstIP.Equal(ipv4TranslatedSource) {
 				t.Fatalf("missing generated IPv6 ICMP error to the sender: %v", packet.ErrorLayer())
@@ -331,15 +326,14 @@ func TestTranslateExpiredTTL(t *testing.T) {
 		})
 
 		t.Run(fmt.Sprintf("IPv6 Hop Limit %d", ttl), func(t *testing.T) {
-			result, err := testTranslator().TranslateIPv6(ipv6TCPPacketWithAddresses(t, ttl, ipv6Dest, ipv6Source), siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, ttl, ipv6Dest, ipv6Source))
 			if !errors.Is(err, siit.ErrTimeExceeded) {
 				t.Fatalf("got error %v, want ErrTimeExceeded", err)
 			}
-			translationErr, ok := err.(*siit.TranslationError)
-			if !ok || !bytes.Equal(translationErr.Packet, result.Packet) {
-				t.Fatalf("TranslationError.Packet does not match returned packet: %T", err)
+			if result.reply == nil {
+				t.Fatalf("no Time Exceeded reply was generated: %T", err)
 			}
-			packet := gopacket.NewPacket(result.Packet, layers.LayerTypeIPv4, gopacket.Default)
+			packet := gopacket.NewPacket(result.reply, layers.LayerTypeIPv4, gopacket.Default)
 			ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if !ok || ip.Protocol != layers.IPProtocolICMPv4 || ip.Checksum != ipv4HeaderChecksum(ip) {
 				t.Fatalf("invalid generated IPv4 ICMP error: %v", packet.ErrorLayer())
@@ -368,22 +362,22 @@ func TestTranslateExpiredTTL(t *testing.T) {
 			v6: withHopLimit(t, ipv6ICMPPacket(t, layers.ICMPv6TypeDestinationUnreachable, 4, ipv6TCPPacket(t, defaultTTL).Data()), 1), dropped: true},
 	} {
 		t.Run(test.name+" with TTL 1", func(t *testing.T) {
-			for direction, translate := range map[string]func() (siit.TranslatedPacket, error){
-				"IPv4": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv4(test.v4, siit.TranslationOverrides{})
+			for direction, translate := range map[string]func() (translation, error){
+				"IPv4": func() (translation, error) {
+					return translateIPv4(t, testTranslator(), test.v4)
 				},
-				"IPv6": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(test.v6, siit.TranslationOverrides{})
+				"IPv6": func() (translation, error) {
+					return translateIPv6(t, testTranslator(), test.v6)
 				},
 			} {
 				result, err := translate()
 				if test.dropped {
-					if result.Packet != nil {
+					if result.packet != nil || result.reply != nil {
 						t.Fatalf("%s: expired ICMP error generated a reply: err=%v", direction, err)
 					}
 					continue
 				}
-				if !errors.Is(err, siit.ErrTimeExceeded) || result.Packet == nil {
+				if !errors.Is(err, siit.ErrTimeExceeded) || result.reply == nil {
 					t.Fatalf("%s: expired %s did not generate Time Exceeded: err=%v", direction, test.name, err)
 				}
 			}
@@ -399,8 +393,8 @@ func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 	for range 4 {
 		ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 8))), layers.LayerTypeIPv6, gopacket.Default)
-		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return translator.TranslateIPv6(input, siit.TranslationOverrides{})
+		result := mustTranslate(t, func() (translation, error) {
+			return translateIPv6(t, translator, input)
 		})
 		ids[binary.BigEndian.Uint16(result[4:6])] = true
 	}
@@ -437,23 +431,23 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 		for _, address := range []string{"0.0.0.0", "127.0.0.1", "127.1.1.1", "169.254.0.42", "224.0.0.1", "239.255.255.250", "255.255.255.255"} {
 			t.Run(fmt.Sprintf("%s/source %s", name, address), func(t *testing.T) {
 				packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, address), embed(prefix, global))
-				result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-				if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.Packet != nil {
-					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedSrcIP", err, len(result.Packet))
+				result, err := translateIPv6(t, setup.translator, packet)
+				if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedSrcIP", err, len(result.packet))
 				}
 			})
 			t.Run(fmt.Sprintf("%s/destination %s", name, address), func(t *testing.T) {
 				packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, global), embed(prefix, address))
-				result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-				if !errors.Is(err, siit.ErrUnsupportedDestIP) || result.Packet != nil {
-					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedDestIP", err, len(result.Packet))
+				result, err := translateIPv6(t, setup.translator, packet)
+				if !errors.Is(err, siit.ErrUnsupportedDestIP) || result.packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedDestIP", err, len(result.packet))
 				}
 			})
 		}
 		t.Run(name+"/global addresses still translate", func(t *testing.T) {
 			packet := ipv6TCPPacketWithAddresses(t, defaultTTL, embed(prefix, global), embed(prefix, "203.0.113.9"))
-			result, err := setup.translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-			if err != nil || result.Packet == nil {
+			result, err := translateIPv6(t, setup.translator, packet)
+			if err != nil || result.packet == nil {
 				t.Fatalf("legal embedded addresses were rejected: %v", err)
 			}
 		})
@@ -462,8 +456,8 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 	t.Run("explicit address mappings are exempt", func(t *testing.T) {
 		translator := translatorWithPrefix(t, "2001:db8:64::/96", siit.RawEAMTable{{IPv4Prefix: "127.0.0.9/32", IPv6Prefix: "2001:db8:eeee::9/128"}})
 		packet := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("2001:db8:eeee::9"), embed("2001:db8:64::", global))
-		result, err := translator.TranslateIPv6(packet, siit.TranslationOverrides{})
-		if err != nil || result.Packet == nil {
+		result, err := translateIPv6(t, translator, packet)
+		if err != nil || result.packet == nil {
 			t.Fatalf("EAM-mapped address was rejected: %v", err)
 		}
 	})
@@ -474,18 +468,18 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 // copying them would make the receiver parse the payload as an extension header. Such packets are rejected, whole or
 // fragmented, while ordinary and unknown protocol numbers are forwarded unchanged.
 func TestTranslateRejectsIPv6ExtensionHeaderProtocolNumbers(t *testing.T) {
-	translate := func(t *testing.T, protocol layers.IPProtocol, flags layers.IPv4Flag) (siit.TranslatedPacket, error) {
+	translate := func(t *testing.T, protocol layers.IPProtocol, flags layers.IPv4Flag) (translation, error) {
 		t.Helper()
 		ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: protocol, Flags: flags, SrcIP: ipv4Source, DstIP: ipv4Dest}
 		input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 64))), layers.LayerTypeIPv4, gopacket.Default)
-		return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+		return translateIPv4(t, testTranslator(), input)
 	}
 	for _, protocol := range []layers.IPProtocol{layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Fragment, layers.IPProtocolIPv6Destination} {
 		for name, flags := range map[string]layers.IPv4Flag{"whole": 0, "more fragments": layers.IPv4MoreFragments} {
 			t.Run(fmt.Sprintf("protocol %d %s", protocol, name), func(t *testing.T) {
 				result, err := translate(t, protocol, flags)
-				if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.Packet != nil {
-					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.Packet))
+				if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.packet != nil {
+					t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.packet))
 				}
 			})
 		}
@@ -493,11 +487,11 @@ func TestTranslateRejectsIPv6ExtensionHeaderProtocolNumbers(t *testing.T) {
 	for _, protocol := range []layers.IPProtocol{16, 69, 135, 253} {
 		t.Run(fmt.Sprintf("protocol %d is forwarded", protocol), func(t *testing.T) {
 			result, err := translate(t, protocol, 0)
-			if err != nil || result.Packet == nil {
+			if err != nil || result.packet == nil {
 				t.Fatalf("ordinary protocol was rejected: %v", err)
 			}
-			if result.Packet[6] != byte(protocol) {
-				t.Fatalf("Next Header = %d, want %d", result.Packet[6], protocol)
+			if result.packet[6] != byte(protocol) {
+				t.Fatalf("Next Header = %d, want %d", result.packet[6], protocol)
 			}
 		})
 	}

@@ -98,7 +98,7 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := ipv4ICMPPacket(t, test.icmpType, test.code, quote)
 			if test.wantType == drop {
-				result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+				result, err := translateIPv4(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -172,7 +172,7 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 			}
 			input := ipv6ICMPPacketWithRestHeader(t, test.icmpType, test.code, rest, quote)
 			if test.wantType == drop {
-				result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+				result, err := translateIPv6(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -299,16 +299,16 @@ func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 // translated either, because the translator would otherwise embed that address in the message it sends.
 func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	nsp := translatorWithPrefix(t, "2001:db8:64::/96", nil)
-	translateV4 := func(translator *siit.Translator, quote []byte) (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv4(ipv4ICMPPacket(t, 3, 3, quote), siit.TranslationOverrides{})
+	translateV4 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
+		return translateIPv4(t, translator, ipv4ICMPPacket(t, 3, 3, quote))
 	}
-	translateV6 := func(translator *siit.Translator, quote []byte) (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv6(ipv6ICMPPacket(t, 1, 4, quote), siit.TranslationOverrides{})
+	translateV6 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
+		return translateIPv6(t, translator, ipv6ICMPPacket(t, 1, 4, quote))
 	}
 	tests := []struct {
 		name       string
 		translator *siit.Translator
-		translate  func(*siit.Translator, []byte) (siit.TranslatedPacket, error)
+		translate  func(*testing.T, *siit.Translator, []byte) (translation, error)
 		quote      []byte
 	}{
 		{"IPv4 error quoting an ICMP error", testTranslator(), translateV4, ipv4ICMPPacket(t, 3, 3, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()).Data()},
@@ -328,8 +328,8 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := test.translate(test.translator, test.quote)
-			if result.Packet != nil {
+			result, err := test.translate(t, test.translator, test.quote)
+			if result.packet != nil {
 				t.Fatalf("ICMP error with an invalid quote was translated: err=%v", err)
 			}
 		})
@@ -359,16 +359,16 @@ func TestTranslateICMPErrorIsTruncatedToMinimumSizes(t *testing.T) {
 	})
 	t.Run("generated Time Exceeded for IPv4", func(t *testing.T) {
 		packet := withTTL(t, ipv4TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200), nil), 1)
-		result, err := testTranslator().TranslateIPv4(packet, siit.TranslationOverrides{})
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.Packet) != maxIPv6PacketLength {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.Packet), err, maxIPv6PacketLength)
+		result, err := translateIPv4(t, testTranslator(), packet)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != maxIPv6PacketLength {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.reply), err, maxIPv6PacketLength)
 		}
 	})
 	t.Run("generated Time Exceeded for IPv6", func(t *testing.T) {
 		packet := withHopLimit(t, ipv6TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200)), 1)
-		result, err := testTranslator().TranslateIPv6(packet, siit.TranslationOverrides{})
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.Packet) != 576 {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.Packet), err)
+		result, err := translateIPv6(t, testTranslator(), packet)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != 576 {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.reply), err)
 		}
 	})
 }
@@ -513,15 +513,15 @@ func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 	t.Run("a destination without mapping is not translated", func(t *testing.T) {
 		quote := ipv6Segment(t, segmentTCP, ipv6Unmappable, ipv6Dest, defaultTTL).Data()
 		input := ipv6ICMPErrorPacket(t, router, net.ParseIP("2a10:3781:56d5:8::e7"), icmpv6DestUnreachable, 0, zeroRestHeader(), quote)
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-		if result.Packet != nil {
+		result, err := translateIPv6(t, testTranslator(), input)
+		if result.packet != nil {
 			t.Fatalf("ICMPv6 error to an unmappable destination was translated: err=%v", err)
 		}
 	})
 	t.Run("an echo request from an unmappable source is not translated", func(t *testing.T) {
 		input := ipv6Segment(t, segmentICMP, router, ipv6Dest, defaultTTL)
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-		if result.Packet != nil {
+		result, err := translateIPv6(t, testTranslator(), input)
+		if result.packet != nil {
 			t.Fatalf("ICMPv6 query from an unmappable source was translated: err=%v", err)
 		}
 	})
@@ -531,11 +531,11 @@ func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 // IPv4 packet is addressed to the translated IPv4 sender, so feeding it back through TranslateIPv6 must produce a
 // deliverable ICMPv4 Time Exceeded for that sender.
 func TestGeneratedTimeExceededCanBeTranslatedBack(t *testing.T) {
-	generated, err := testTranslator().TranslateIPv4(ipv4TCPPacket(t, 1), siit.TranslationOverrides{})
-	if !errors.Is(err, siit.ErrTimeExceeded) || generated.Packet == nil {
+	generated, err := translateIPv4(t, testTranslator(), ipv4TCPPacket(t, 1))
+	if !errors.Is(err, siit.ErrTimeExceeded) || generated.reply == nil {
 		t.Fatalf("expired packet did not generate Time Exceeded: err=%v", err)
 	}
-	result := translateToICMPv4(t, testTranslator(), gopacket.NewPacket(generated.Packet, layers.LayerTypeIPv6, gopacket.Default))
+	result := translateToICMPv4(t, testTranslator(), gopacket.NewPacket(generated.reply, layers.LayerTypeIPv6, gopacket.Default))
 	if !result.ip.DstIP.Equal(ipv4Source) || !result.ip.SrcIP.Equal(ipv4RouterAddress) || result.icmp.TypeCode != layers.CreateICMPv4TypeCode(icmpv4TimeExceeded, 0) {
 		t.Fatalf("generated Time Exceeded was not translated into a deliverable ICMPv4 error: %v", result.packet.ErrorLayer())
 	}
