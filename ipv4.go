@@ -53,22 +53,27 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		return nil, fmt.Errorf("%w: IPv4 Total Length %d does not match the packet", ErrInvalidPacket, ip.Length)
 	}
 
+	source, destination := ipv4Addr(ip.SrcIP), ipv4Addr(ip.DstIP)
+
 	// Verify that src and dst are both unicast
-	if !ip.SrcIP.IsGlobalUnicast() {
+	if !source.IsGlobalUnicast() {
 		return nil, fmt.Errorf("%w: IPv4 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
 	}
 
-	if !ip.DstIP.IsGlobalUnicast() {
+	if !destination.IsGlobalUnicast() {
 		return nil, fmt.Errorf("%w: IPv4 destination %s is not unicast", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
+	// Each address is looked up once; the checks below and the IPv6 header read the result.
+	sourceMapping, destinationMapping := t.resolveIPv4(source), t.resolveIPv4(destination)
+
 	// RFC 6052 Section 3.1: non-global addresses must not be embedded in the Well-Known Prefix.
-	if t.isForbiddenIPv4(ip.SrcIP) {
-		return nil, fmt.Errorf("%w: non-global IPv4 source %s cannot use the Well-Known Prefix", ErrUnsupportedSrcIP, ip.SrcIP)
+	if t.isForbiddenIPv4(source, sourceMapping) {
+		return nil, fmt.Errorf("%w: non-global IPv4 source %s cannot use the Well-Known Prefix", ErrUnsupportedSrcIP, source)
 	}
 
-	if t.isForbiddenIPv4(ip.DstIP) {
-		return nil, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDstIP, ip.DstIP)
+	if t.isForbiddenIPv4(destination, destinationMapping) {
+		return nil, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDstIP, destination)
 	}
 
 	// IPv6 extension headers have no IPv4 equivalent. Forwarding their protocol numbers would make the receiver
@@ -134,7 +139,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 
 		// Check the transport checksum (skip if fragment)
 		// RFC 768: IPv4 UDP may omit its checksum.
-		pseudoHeader := ipv4PseudoHeader(ip.SrcIP, ip.DstIP, ip.Protocol, len(ip.Payload))
+		pseudoHeader := ipv4PseudoHeader(source, destination, ip.Protocol, len(ip.Payload))
 		if !fragmented && !isZeroUDPChecksum(ip.Payload, ip.Protocol) && !validTransportChecksum(pseudoHeader, ip.Protocol, ip.Payload) {
 			return nil, fmt.Errorf("%w: invalid IPv4 transport checksum", ErrInvalidPacket)
 		}
@@ -152,14 +157,15 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 
 	// Create a new IPv6 packet that matches the IPv4 Packet without any payload
 	protocol := ip.Protocol
+	translatedSource, translatedDestination := layerAddresses(sourceMapping.ipv6, destinationMapping.ipv6)
 	ipv6 := &layers.IPv6{
 		Version:      6,
 		TrafficClass: ip.TOS,
 		FlowLabel:    0, // Flow Label:  0 (all zero bits)
 		NextHeader:   protocol,
 		HopLimit:     ttl,
-		SrcIP:        t.mapIPv4ToIPv6(ip.SrcIP),
-		DstIP:        t.mapIPv4ToIPv6(ip.DstIP),
+		SrcIP:        translatedSource,
+		DstIP:        translatedDestination,
 	}
 
 	// ICMP has some special translation rules and validations
@@ -179,8 +185,8 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 	// ===
 
 	length := int(ip.Length) - int(ip.IHL)*4
-	removed := ipv4PseudoHeader(ip.SrcIP, ip.DstIP, ip.Protocol, length)
-	added := ipv6PseudoHeader(ipv6.SrcIP, ipv6.DstIP, protocol, length)
+	removed := ipv4PseudoHeader(source, destination, ip.Protocol, length)
+	added := ipv6PseudoHeader(sourceMapping.ipv6, destinationMapping.ipv6, protocol, length)
 
 	var payload []byte
 	var dropped bool
@@ -196,7 +202,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		// RFC 7915 Section 4.5: "the translator SHOULD drop the packet and generate a system management event that
 		// specifies at least the IP addresses and port numbers in the packet."
 		if fragmented && !quoted && ip.FragOffset == 0 && isZeroUDPChecksum(payload, ip.Protocol) {
-			return nil, zeroUDPChecksumError(ip.SrcIP, ip.DstIP, payload)
+			return nil, zeroUDPChecksumError(source, destination, payload)
 		}
 
 		// Only the first fragment holds the transport header.

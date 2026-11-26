@@ -14,7 +14,7 @@ import (
 func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv4) Packet {
 	outer := &layers.IPv4{
 		Version: 4, IHL: 5, Protocol: layers.IPProtocolICMPv4, TTL: 64,
-		SrcIP: t.ipv4RouterAddress, DstIP: ip.SrcIP,
+		SrcIP: t.ipv4RouterAddress.AsSlice(), DstIP: ip.SrcIP,
 	}
 
 	// RFC 1812 Section 4.3.2.3 (SHOULD): "the ICMP datagram SHOULD contain as much of the original datagram as possible
@@ -37,7 +37,7 @@ func (t *Translator) generateICMPv6Error(ip *layers.IPv6, icmpType, code byte, r
 		Version:    6,
 		NextHeader: layers.IPProtocolICMPv6,
 		HopLimit:   64,
-		SrcIP:      t.mapIPv4ToIPv6(t.ipv4RouterAddress),
+		SrcIP:      t.ipv6RouterAddress.AsSlice(),
 		DstIP:      ip.SrcIP,
 	}
 
@@ -59,7 +59,7 @@ func (t *Translator) generateICMPv6Error(ip *layers.IPv6, icmpType, code byte, r
 func (t *Translator) generateIPv4SourceRouteFailed(ip *layers.IPv4) Packet {
 	outer := &layers.IPv4{
 		Version: 4, IHL: 5, Protocol: layers.IPProtocolICMPv4, TTL: 64,
-		SrcIP: t.ipv4RouterAddress, DstIP: ip.SrcIP,
+		SrcIP: t.ipv4RouterAddress.AsSlice(), DstIP: ip.SrcIP,
 	}
 
 	quote := slices.Concat(ip.Contents, ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)])

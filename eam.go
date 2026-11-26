@@ -2,7 +2,6 @@ package siit
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 	"strings"
 )
@@ -57,10 +56,8 @@ func parseEAMPrefix(prefix string) (netip.Prefix, error) {
 }
 
 type eamMapping struct {
-	ipv4     net.IP
-	ipv6     net.IP
-	ipv4Bits int
-	ipv6Bits int
+	ipv4 netip.Prefix
+	ipv6 netip.Prefix
 }
 
 type eamNode struct {
@@ -82,13 +79,13 @@ func newEAMLookup(table EAMTable) (*eamLookup, error) {
 			return nil, fmt.Errorf("EAM entry at index %d: %w", index, err)
 		}
 
-		ipv4, ipv6 := net.IP(ipv4Prefix.Addr().AsSlice()), net.IP(ipv6Prefix.Addr().AsSlice())
-		mapping := &eamMapping{ipv4: ipv4, ipv6: ipv6, ipv4Bits: ipv4Prefix.Bits(), ipv6Bits: ipv6Prefix.Bits()}
-		if !insertEAMMapping(lookup.ipv4Root, mapping.ipv4, mapping.ipv4Bits, mapping) {
+		mapping := &eamMapping{ipv4: ipv4Prefix, ipv6: ipv6Prefix}
+		ipv4, ipv6 := ipv4Prefix.Addr().As4(), ipv6Prefix.Addr().As16()
+		if !insertEAMMapping(lookup.ipv4Root, ipv4[:], ipv4Prefix.Bits(), mapping) {
 			return nil, fmt.Errorf("EAM entry at index %d: duplicate IPv4 prefix %v", index, ipv4Prefix)
 		}
 
-		if !insertEAMMapping(lookup.ipv6Root, mapping.ipv6, mapping.ipv6Bits, mapping) {
+		if !insertEAMMapping(lookup.ipv6Root, ipv6[:], ipv6Prefix.Bits(), mapping) {
 			return nil, fmt.Errorf("EAM entry at index %d: duplicate IPv6 prefix %v", index, ipv6Prefix)
 		}
 	}
@@ -112,7 +109,7 @@ func validateEAMEntry(entry EAMEntry) (netip.Prefix, netip.Prefix, error) {
 	// RFC 7757 Section 3.2 requires the IPv4 prefix to have no more
 	// suffix bits than its corresponding IPv6 prefix. This leaves room
 	// for every IPv4 suffix bit in the RFC 7757 Section 3.3.1 result.
-	if ipv6Bits+32-ipv4Bits > net.IPv6len*8 {
+	if ipv6Bits+32-ipv4Bits > 128 {
 		return ipv4Prefix, ipv6Prefix, fmt.Errorf("%v cannot carry the IPv4 suffix of %v", entry.IPv6Prefix, entry.IPv4Prefix)
 	}
 
@@ -120,7 +117,7 @@ func validateEAMEntry(entry EAMEntry) (netip.Prefix, netip.Prefix, error) {
 }
 
 // Inserts a mapping into the EAM lookup tree. Returns false if the prefix already has a mapping.
-func insertEAMMapping(root *eamNode, address net.IP, bits int, mapping *eamMapping) bool {
+func insertEAMMapping(root *eamNode, address []byte, bits int, mapping *eamMapping) bool {
 	node := root
 	for bitIndex := 0; bitIndex < bits; bitIndex++ {
 		bit := getBit(address, bitIndex)
@@ -139,17 +136,7 @@ func insertEAMMapping(root *eamNode, address net.IP, bits int, mapping *eamMappi
 }
 
 // Gets the longest prefix match for the given address in the EAM lookup tree. Returns nil if no match is found.
-func lookupEAMMapping(root *eamNode, address net.IP, bits int) *eamMapping {
-	if address == nil {
-		return nil
-	}
-
-	if bits == net.IPv4len*8 {
-		address = address.To4()
-	} else {
-		address = address.To16()
-	}
-
+func lookupEAMMapping(root *eamNode, address []byte, bits int) *eamMapping {
 	node := root
 	var match *eamMapping
 	for bitIndex := 0; bitIndex < bits; bitIndex++ {
@@ -170,42 +157,34 @@ func lookupEAMMapping(root *eamNode, address net.IP, bits int) *eamMapping {
 	return match
 }
 
-// Maps an IPv4 address to an IPv6 address using the EAM lookup table. Returns nil if no mapping is found.
-func (t *Translator) mapIPv4ToIPv6EAM(ipv4 net.IP) net.IP {
-	ipv4 = ipv4.To4()
-	if ipv4 == nil || t.eamLookup == nil {
-		return nil
-	}
-
-	mapping := lookupEAMMapping(t.eamLookup.ipv4Root, ipv4, net.IPv4len*8)
+// Maps an IPv4 address to an IPv6 address using the EAM lookup table. Returns false if no mapping is found.
+func (t *Translator) mapIPv4ToIPv6EAM(ipv4 netip.Addr) (netip.Addr, bool) {
+	address := ipv4.As4()
+	mapping := lookupEAMMapping(t.eamLookup.ipv4Root, address[:], 32)
 	if mapping == nil {
-		return nil
+		return netip.Addr{}, false
 	}
 
-	result := append(net.IP(nil), mapping.ipv6...)
-	for offset := 0; offset < net.IPv4len*8-mapping.ipv4Bits; offset++ {
-		setBit(result, mapping.ipv6Bits+offset, getBit(ipv4, mapping.ipv4Bits+offset))
+	result := mapping.ipv6.Addr().As16()
+	for offset := 0; offset < 32-mapping.ipv4.Bits(); offset++ {
+		setBit(result[:], mapping.ipv6.Bits()+offset, getBit(address[:], mapping.ipv4.Bits()+offset))
 	}
 
-	return result
+	return netip.AddrFrom16(result), true
 }
 
-// Maps an IPv6 address to an IPv4 address using the EAM lookup table. Returns nil if no mapping is found.
-func (t *Translator) mapIPv6ToIPv4EAM(ipv6 net.IP) net.IP {
-	ipv6 = ipv6.To16()
-	if ipv6 == nil || t.eamLookup == nil {
-		return nil
-	}
-
-	mapping := lookupEAMMapping(t.eamLookup.ipv6Root, ipv6, net.IPv6len*8)
+// Maps an IPv6 address to an IPv4 address using the EAM lookup table. Returns false if no mapping is found.
+func (t *Translator) mapIPv6ToIPv4EAM(ipv6 netip.Addr) (netip.Addr, bool) {
+	address := ipv6.As16()
+	mapping := lookupEAMMapping(t.eamLookup.ipv6Root, address[:], 128)
 	if mapping == nil {
-		return nil
+		return netip.Addr{}, false
 	}
 
-	result := append(net.IP(nil), mapping.ipv4...)
-	for offset := 0; offset < net.IPv4len*8-mapping.ipv4Bits; offset++ {
-		setBit(result, mapping.ipv4Bits+offset, getBit(ipv6, mapping.ipv6Bits+offset))
+	result := mapping.ipv4.Addr().As4()
+	for offset := 0; offset < 32-mapping.ipv4.Bits(); offset++ {
+		setBit(result[:], mapping.ipv4.Bits()+offset, getBit(address[:], mapping.ipv6.Bits()+offset))
 	}
 
-	return result
+	return netip.AddrFrom4(result), true
 }

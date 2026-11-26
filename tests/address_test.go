@@ -175,6 +175,17 @@ func TestTranslateIPv6WithoutMappingIsRejected(t *testing.T) {
 }
 
 // RFC 6052 Section 2.2 (SHOULD): "embedded IPv6 addresses where [suffix] bits are not zero SHOULD ignore" them.
+// Regression guard: an IPv4-mapped address (::ffff:0:0/96) is not inside a NAT64 prefix like ::/64 that shares its
+// leading bits. Otherwise ::ffff:8.8.8.8 would map to 0.255.255.8.
+func TestIPv4MappedAddressIsNotInTheNAT64Prefix(t *testing.T) {
+	destination := embedIPv4(net.ParseIP("::"), 64, ipv4Dest)
+	packet := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("::ffff:8.8.8.8"), destination)
+	result, err := translateIPv6(t, translatorWithPrefix(t, "::/64", nil), packet)
+	if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.packet != nil {
+		t.Fatalf("IPv4-mapped source returned err=%v, packet length %d, want ErrUnsupportedSrcIP", err, len(result.packet))
+	}
+}
+
 func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 	for _, prefix := range []string{"2001:db8::/32", "2001:db8:100::/40", "2001:db8:122::/48", "2001:db8:122:300::/56", "2001:db8:122:344::/64"} {
 		t.Run(prefix, func(t *testing.T) {

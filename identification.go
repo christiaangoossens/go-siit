@@ -3,7 +3,7 @@ package siit
 import (
 	"hash/maphash"
 	"math/rand/v2"
-	"net"
+	"net/netip"
 	"sync/atomic"
 )
 
@@ -30,10 +30,11 @@ func newIdentificationGenerator() *identificationGenerator {
 	return generator
 }
 
-func (g *identificationGenerator) next(source, destination net.IP) uint16 {
+func (g *identificationGenerator) next(source, destination netip.Addr) uint16 {
+	sourceBytes, destinationBytes := source.As4(), destination.As4()
 	var key [8]byte
-	copy(key[0:4], source.To4())
-	copy(key[4:8], destination.To4())
+	copy(key[0:4], sourceBytes[:])
+	copy(key[4:8], destinationBytes[:])
 	sum := maphash.Bytes(g.seed, key[:])
 
 	offset := uint16(sum >> 48)

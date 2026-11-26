@@ -56,7 +56,7 @@ func newICMPv4(icmpType, code byte, rest uint32, data []byte) []byte {
 // newICMPv6 is like newICMPv4, but the checksum covers the pseudo-header of the IPv6 packet (RFC 4443 Section 2.3).
 func newICMPv6(ip *layers.IPv6, icmpType, code byte, rest uint32, data []byte) []byte {
 	message := append(binary.BigEndian.AppendUint32([]byte{icmpType, code, 0, 0}, rest), data...)
-	pseudoHeader := ipv6PseudoHeader(ip.SrcIP, ip.DstIP, layers.IPProtocolICMPv6, len(message))
+	pseudoHeader := ipv6PseudoHeader(ipv6Addr(ip.SrcIP), ipv6Addr(ip.DstIP), layers.IPProtocolICMPv6, len(message))
 	binary.BigEndian.PutUint16(message[2:], internetChecksum(pseudoHeader, message))
 	return message
 }

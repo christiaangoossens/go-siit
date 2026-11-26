@@ -2,7 +2,6 @@ package siit
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 )
 
@@ -13,20 +12,15 @@ func isRFC6052PrefixLength(bits int) bool {
 }
 
 // RFC 6052 Section 3.1 forbids representing these non-global IPv4 addresses specifically for the Well-Known Prefix.
-var nonGlobalIPv4Networks = func() []*net.IPNet {
-	var networks []*net.IPNet
-	for _, cidr := range []string{
-		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
-		"192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
-		"203.0.113.0/24", "224.0.0.0/3",
-	} {
-		_, network, _ := net.ParseCIDR(cidr)
-		networks = append(networks, network)
-	}
-	return networks
-}()
+var nonGlobalIPv4Networks = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/3"),
+}
 
-func isNonGlobalIPv4(ipv4 net.IP) bool {
+func isNonGlobalIPv4(ipv4 netip.Addr) bool {
 	for _, network := range nonGlobalIPv4Networks {
 		if network.Contains(ipv4) {
 			return true
@@ -36,17 +30,12 @@ func isNonGlobalIPv4(ipv4 net.IP) bool {
 	return false
 }
 
-var wellKnownPrefix = net.ParseIP("64:ff9b::")
+var wellKnownPrefix = netip.MustParsePrefix("64:ff9b::/96")
 
-func isWellKnownPrefix(prefix *net.IPNet) bool {
-	ones, _ := prefix.Mask.Size()
-	return ones == 96 && prefix.IP.Equal(wellKnownPrefix)
-}
-
-// validateRFC6052Prefix returns the prefix, with its host bits cleared, as the network the translator works with.
-func validateRFC6052Prefix(prefix netip.Prefix) (*net.IPNet, error) {
+// validateRFC6052Prefix returns the prefix with its host bits cleared.
+func validateRFC6052Prefix(prefix netip.Prefix) (netip.Prefix, error) {
 	if !prefix.IsValid() || !prefix.Addr().Is6() || prefix.Addr().Is4In6() || !isRFC6052PrefixLength(prefix.Bits()) {
-		return nil, fmt.Errorf("NAT64 prefix must be an IPv6 /32, /40, /48, /56, /64, or /96 prefix, got: %v", prefix)
+		return netip.Prefix{}, fmt.Errorf("NAT64 prefix must be an IPv6 /32, /40, /48, /56, /64, or /96 prefix, got: %v", prefix)
 	}
 
 	prefix = prefix.Masked()
@@ -54,116 +43,117 @@ func validateRFC6052Prefix(prefix netip.Prefix) (*net.IPNet, error) {
 	// RFC 6052 Section 2.2: bits 64-71 (the "u" octet) MUST be zero. Shorter prefixes never reach them, but a /96
 	// prefix contains them, so the administrator has to configure them as zero.
 	if prefix.Addr().As16()[8] != 0 {
-		return nil, fmt.Errorf("NAT64 prefix must have a zero u octet (bits 64-71), got: %v", prefix)
+		return netip.Prefix{}, fmt.Errorf("NAT64 prefix must have a zero u octet (bits 64-71), got: %v", prefix)
 	}
 
-	return &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(prefix.Bits(), net.IPv6len*8)}, nil
+	return prefix, nil
 }
 
-func mapIPv4ToIPv6RFC6052(prefix *net.IPNet, ipv4 net.IP) net.IP {
-	prefixBits, _ := prefix.Mask.Size()
-	ipv6 := make(net.IP, net.IPv6len)
-	copy(ipv6, prefix.IP.To16())
-	ipv4 = ipv4.To4()
+func mapIPv4ToIPv6RFC6052(prefix netip.Prefix, ipv4 netip.Addr) netip.Addr {
+	prefixBits := prefix.Bits()
+	ipv6 := prefix.Addr().As16()
+	embedded := ipv4.As4()
 
 	if prefixBits == 96 {
-		copy(ipv6[12:], ipv4)
-		return ipv6
+		copy(ipv6[12:], embedded[:])
+		return netip.AddrFrom16(ipv6)
 	}
 
 	// RFC 6052 reserves bits 64-71 as the zero-valued "u" octet for
 	// every prefix length other than /96.
 	firstBits := 64 - prefixBits
 	for bitIndex := 0; bitIndex < firstBits; bitIndex++ {
-		setBit(ipv6, prefixBits+bitIndex, getBit(ipv4, bitIndex))
+		setBit(ipv6[:], prefixBits+bitIndex, getBit(embedded[:], bitIndex))
 	}
-	for bitIndex := firstBits; bitIndex < net.IPv4len*8; bitIndex++ {
-		setBit(ipv6, 72+bitIndex-firstBits, getBit(ipv4, bitIndex))
+	for bitIndex := firstBits; bitIndex < 32; bitIndex++ {
+		setBit(ipv6[:], 72+bitIndex-firstBits, getBit(embedded[:], bitIndex))
 	}
 
-	return ipv6
+	return netip.AddrFrom16(ipv6)
 }
 
-func mapIPv6ToIPv4RFC6052(prefix *net.IPNet, ipv6 net.IP) net.IP {
-	prefixBits, _ := prefix.Mask.Size()
-	ipv6 = ipv6.To16()
-	ipv4 := make(net.IP, net.IPv4len)
+func mapIPv6ToIPv4RFC6052(prefix netip.Prefix, ipv6 netip.Addr) netip.Addr {
+	prefixBits := prefix.Bits()
+	address := ipv6.As16()
+	var ipv4 [4]byte
 
 	if prefixBits == 96 {
-		copy(ipv4, ipv6[12:])
-		return ipv4
+		copy(ipv4[:], address[12:])
+		return netip.AddrFrom4(ipv4)
 	}
 
 	firstBits := 64 - prefixBits
 	for bitIndex := 0; bitIndex < firstBits; bitIndex++ {
-		setBit(ipv4, bitIndex, getBit(ipv6, prefixBits+bitIndex))
+		setBit(ipv4[:], bitIndex, getBit(address[:], prefixBits+bitIndex))
 	}
-	for bitIndex := firstBits; bitIndex < net.IPv4len*8; bitIndex++ {
-		setBit(ipv4, bitIndex, getBit(ipv6, 72+bitIndex-firstBits))
+	for bitIndex := firstBits; bitIndex < 32; bitIndex++ {
+		setBit(ipv4[:], bitIndex, getBit(address[:], 72+bitIndex-firstBits))
 	}
 
-	return ipv4
+	return netip.AddrFrom4(ipv4)
+}
+
+// General mapping functions
+//
+// Each address is looked up once, and the checks read the result. Looking up the EAM table is the most expensive
+// step, so it is not repeated per check.
+
+// ipv4Mapping is the IPv6 address that an IPv4 address maps to.
+type ipv4Mapping struct {
+	ipv6 netip.Addr
+
+	// Whether an EAM entry gave the mapping, rather than the NAT64 prefix.
+	eam bool
+}
+
+func (t *Translator) resolveIPv4(ipv4 netip.Addr) ipv4Mapping {
+	// Check if already present in table
+	if mapped, ok := t.mapIPv4ToIPv6EAM(ipv4); ok {
+		return ipv4Mapping{ipv6: mapped, eam: true}
+	}
+
+	return ipv4Mapping{ipv6: mapIPv4ToIPv6RFC6052(t.nat64Prefix, ipv4)}
 }
 
 // isForbiddenIPv4 reports whether RFC 6052 Section 3.1 forbids translating this IPv4 address. EAM entries are explicit and therefore exempt.
-func (t *Translator) isForbiddenIPv4(ipv4 net.IP) bool {
-	// The EAM lookup is the most expensive check, so it goes last.
-	if !t.wellKnownPrefix || !isNonGlobalIPv4(ipv4) {
-		return false
-	}
-
-	return t.mapIPv4ToIPv6EAM(ipv4) == nil
+func (t *Translator) isForbiddenIPv4(ipv4 netip.Addr, mapping ipv4Mapping) bool {
+	return t.wellKnownPrefix && !mapping.eam && isNonGlobalIPv4(ipv4)
 }
 
-func (t *Translator) isForbiddenIPv6(ipv6 net.IP) bool {
-	if !t.wellKnownPrefix || !t.nat64Net.Contains(ipv6) || !isNonGlobalIPv4(mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6)) {
-		return false
+// ipv6Mapping is the IPv4 address that an IPv6 address maps to. The address is invalid when there is no mapping.
+type ipv6Mapping struct {
+	ipv4 netip.Addr
+
+	// Whether an EAM entry gave the mapping, rather than the NAT64 prefix.
+	eam bool
+}
+
+func (t *Translator) resolveIPv6(ipv6 netip.Addr) ipv6Mapping {
+	// Check if already present in table
+	if mapped, ok := t.mapIPv6ToIPv4EAM(ipv6); ok {
+		return ipv6Mapping{ipv4: mapped, eam: true}
 	}
 
-	return t.mapIPv6ToIPv4EAM(ipv6) == nil
+	// Check if the IPv6 address is within the NAT64 prefix. An IPv4-mapped address (::ffff:0:0/96) never is, even for
+	// a prefix like ::/32 whose bits it shares.
+	if !ipv6.Is4In6() && t.nat64Prefix.Contains(ipv6) {
+		return ipv6Mapping{ipv4: mapIPv6ToIPv4RFC6052(t.nat64Prefix, ipv6)}
+	}
+
+	return ipv6Mapping{}
+}
+
+func (m ipv6Mapping) mappable() bool {
+	return m.ipv4.IsValid()
+}
+
+func (t *Translator) isForbiddenIPv6(mapping ipv6Mapping) bool {
+	return t.wellKnownPrefix && mapping.mappable() && !mapping.eam && isNonGlobalIPv4(mapping.ipv4)
 }
 
 // isIllegalIPv4Embedded reports whether an IPv6 address inside the NAT64 prefix embeds an IPv4 address that is not
 // global unicast (unspecified, loopback, link-local, multicast, broadcast). Such an address would be an illegal IPv4
 // source or destination (RFC 1812 Section 5.3.7). EAM entries are explicit and therefore exempt.
-func (t *Translator) isIllegalIPv4Embedded(ipv6 net.IP) bool {
-	if t.mapIPv6ToIPv4EAM(ipv6) != nil || !t.nat64Net.Contains(ipv6) {
-		return false
-	}
-
-	return !mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6).IsGlobalUnicast()
-}
-
-// General mapping functions
-
-func (t *Translator) mapIPv4ToIPv6(ipv4 net.IP) net.IP {
-	// Check if already present in table
-	if mapped := t.mapIPv4ToIPv6EAM(ipv4); mapped != nil {
-		return mapped
-	}
-
-	return mapIPv4ToIPv6RFC6052(t.nat64Net, ipv4)
-}
-
-func (t *Translator) mapIPv6ToIPv4(ipv6 net.IP) net.IP {
-	// Check if already present in table
-	if mapped := t.mapIPv6ToIPv4EAM(ipv6); mapped != nil {
-		return mapped
-	}
-
-	// Check if the IPv6 address is within the NAT64 prefix
-	if t.nat64Net.Contains(ipv6) {
-		return mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6)
-	}
-
-	// Else, special case: use our ipv4 router address as we cannot translate
-	return t.ipv4RouterAddress
-}
-
-func (t *Translator) hasIPv6ToIPv4Mapping(ipv6 net.IP) bool {
-	if t.nat64Net.Contains(ipv6) {
-		return true
-	}
-
-	return ipv6.To16() != nil && t.eamLookup != nil && lookupEAMMapping(t.eamLookup.ipv6Root, ipv6, net.IPv6len*8) != nil
+func isIllegalIPv4Embedded(mapping ipv6Mapping) bool {
+	return mapping.mappable() && !mapping.eam && !mapping.ipv4.IsGlobalUnicast()
 }

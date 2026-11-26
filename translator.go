@@ -2,20 +2,22 @@ package siit
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 )
 
 // Translator converts packets between IPv4 and IPv6 according to SIIT.
 type Translator struct {
 	// Network prefix used for NAT64 translation, as defined in RFC 6052.
-	nat64Net *net.IPNet
+	nat64Prefix netip.Prefix
 
-	// Whether nat64Net is the Well-Known Prefix (RFC 6052 Section 2.1).
+	// Whether nat64Prefix is the Well-Known Prefix (RFC 6052 Section 2.1).
 	wellKnownPrefix bool
 
 	// IPv4 address used for routing and ICMP error generation
-	ipv4RouterAddress net.IP
+	ipv4RouterAddress netip.Addr
+
+	// ipv4RouterAddress mapped to IPv6, the source of generated ICMPv6 errors.
+	ipv6RouterAddress netip.Addr
 
 	// EAM table (RFC 7757)
 	eamLookup *eamLookup
@@ -59,7 +61,7 @@ func NewTranslator(config Config) (*Translator, error) {
 		return nil, fmt.Errorf("%w: %w: %d", ErrInvalidConfig, ErrInvalidMTU, mtu)
 	}
 
-	nat64Net, err := validateRFC6052Prefix(config.NAT64Prefix)
+	nat64Prefix, err := validateRFC6052Prefix(config.NAT64Prefix)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
@@ -75,19 +77,21 @@ func NewTranslator(config Config) (*Translator, error) {
 	}
 
 	translator := &Translator{
-		nat64Net:          nat64Net,
-		wellKnownPrefix:   isWellKnownPrefix(nat64Net),
-		ipv4RouterAddress: net.IP(router.AsSlice()),
+		nat64Prefix:       nat64Prefix,
+		wellKnownPrefix:   nat64Prefix == wellKnownPrefix,
+		ipv4RouterAddress: router,
 		eamLookup:         eamLookup,
 		identifications:   newIdentificationGenerator(),
 		mtu:               mtu,
 	}
 
 	// Generated ICMPv6 errors come from the router address mapped to IPv6, so it must be mappable.
-	if translator.isForbiddenIPv4(translator.ipv4RouterAddress) {
+	routerMapping := translator.resolveIPv4(router)
+	if translator.isForbiddenIPv4(router, routerMapping) {
 		return nil, fmt.Errorf("%w: IPv4 router address %v is non-global and cannot use the Well-Known Prefix, add an EAM entry for it", ErrInvalidConfig, router)
 	}
 
+	translator.ipv6RouterAddress = routerMapping.ipv6
 	return translator, nil
 }
 

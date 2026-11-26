@@ -3,8 +3,7 @@ package siit
 import (
 	"encoding/binary"
 	"fmt"
-	"net"
-	"strconv"
+	"net/netip"
 
 	"github.com/google/gopacket/layers"
 )
@@ -64,7 +63,7 @@ func adjustChecksum(checksum uint16, removed, added []byte) uint16 {
 // Kept small enough to inline, so the header is allocated on the caller's stack.
 
 // The ICMPv4 checksum has no pseudo-header (RFC 792).
-func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+func ipv4PseudoHeader(source, destination netip.Addr, protocol layers.IPProtocol, length int) []byte {
 	if protocol == layers.IPProtocolICMPv4 {
 		return nil
 	}
@@ -74,23 +73,28 @@ func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, le
 	return header
 }
 
-func fillIPv4PseudoHeader(header []byte, source, destination net.IP, protocol layers.IPProtocol, length int) {
-	copy(header[0:4], source.To4())
-	copy(header[4:8], destination.To4())
+func fillIPv4PseudoHeader(header []byte, source, destination netip.Addr, protocol layers.IPProtocol, length int) {
+	sourceBytes, destinationBytes := source.As4(), destination.As4()
+	copy(header[0:4], sourceBytes[:])
+	copy(header[4:8], destinationBytes[:])
 	header[9] = byte(protocol)
 	binary.BigEndian.PutUint16(header[10:12], uint16(length))
 }
 
 // RFC 8200 Section 8.1
-func ipv6PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+func ipv6PseudoHeader(source, destination netip.Addr, protocol layers.IPProtocol, length int) []byte {
 	header := make([]byte, 40)
 	fillIPv6PseudoHeader(header, source, destination, protocol, length)
 	return header
 }
 
-func fillIPv6PseudoHeader(header []byte, source, destination net.IP, protocol layers.IPProtocol, length int) {
-	copy(header[0:16], source.To16())
-	copy(header[16:32], destination.To16())
+// Inlining this would make ipv6PseudoHeader too large to inline itself.
+//
+//go:noinline
+func fillIPv6PseudoHeader(header []byte, source, destination netip.Addr, protocol layers.IPProtocol, length int) {
+	sourceBytes, destinationBytes := source.As16(), destination.As16()
+	copy(header[0:16], sourceBytes[:])
+	copy(header[16:32], destinationBytes[:])
 	binary.BigEndian.PutUint32(header[32:36], uint32(length))
 	header[39] = byte(protocol)
 }
@@ -117,8 +121,8 @@ func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
 
 // zeroUDPChecksumError names the addresses and ports of a UDP payload that isZeroUDPChecksum accepted, so the caller
 // can log it.
-func zeroUDPChecksumError(source, destination net.IP, payload []byte) error {
-	sourcePort := strconv.Itoa(int(binary.BigEndian.Uint16(payload[0:2])))
-	destinationPort := strconv.Itoa(int(binary.BigEndian.Uint16(payload[2:4])))
-	return fmt.Errorf("%w: %s -> %s", ErrZeroUDPChecksum, net.JoinHostPort(source.String(), sourcePort), net.JoinHostPort(destination.String(), destinationPort))
+func zeroUDPChecksumError(source, destination netip.Addr, payload []byte) error {
+	sourceEndpoint := netip.AddrPortFrom(source, binary.BigEndian.Uint16(payload[0:2]))
+	destinationEndpoint := netip.AddrPortFrom(destination, binary.BigEndian.Uint16(payload[2:4]))
+	return fmt.Errorf("%w: %s -> %s", ErrZeroUDPChecksum, sourceEndpoint, destinationEndpoint)
 }

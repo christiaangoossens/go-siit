@@ -62,11 +62,12 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	}
 
 	// Verify that src and dst are both unicast
-	if !ip.SrcIP.IsGlobalUnicast() {
+	source, destination := ipv6Addr(ip.SrcIP), ipv6Addr(ip.DstIP)
+	if !source.IsGlobalUnicast() {
 		return nil, fmt.Errorf("%w: IPv6 source %s is not unicast", ErrUnsupportedSrcIP, ip.SrcIP)
 	}
 
-	if !ip.DstIP.IsGlobalUnicast() {
+	if !destination.IsGlobalUnicast() {
 		return nil, fmt.Errorf("%w: IPv6 destination %s is not unicast", ErrUnsupportedDstIP, ip.DstIP)
 	}
 
@@ -109,30 +110,39 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	// RFC 4443 defines types 0-127 as errors. A quoted packet has no such exception: an ICMP error quoting an ICMP error is not translated.
 	routerSource := !quoted && protocol == layers.IPProtocolICMPv6 && len(payload) > 0 && payload[0] < 128
 
+	// Each address is looked up once; the checks below and the IPv4 header read the result.
+	sourceMapping, destinationMapping := t.resolveIPv6(source), t.resolveIPv6(destination)
+
 	// RFC 6052 Section 3.1: non-global addresses must not be embedded in the Well-Known Prefix.
-	if t.isForbiddenIPv6(ip.SrcIP) {
-		return nil, fmt.Errorf("%w: IPv6 source %s embeds a non-global IPv4 address", ErrUnsupportedSrcIP, ip.SrcIP)
+	if t.isForbiddenIPv6(sourceMapping) {
+		return nil, fmt.Errorf("%w: IPv6 source %s embeds a non-global IPv4 address", ErrUnsupportedSrcIP, source)
 	}
 
-	if !routerSource && !t.hasIPv6ToIPv4Mapping(ip.SrcIP) {
-		return nil, fmt.Errorf("%w: IPv6 source %s is not mappable", ErrUnsupportedSrcIP, ip.SrcIP)
+	if !routerSource && !sourceMapping.mappable() {
+		return nil, fmt.Errorf("%w: IPv6 source %s is not mappable", ErrUnsupportedSrcIP, source)
 	}
 
-	if t.isForbiddenIPv6(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s embeds a non-global IPv4 address", ErrUnsupportedDstIP, ip.DstIP)
+	if t.isForbiddenIPv6(destinationMapping) {
+		return nil, fmt.Errorf("%w: IPv6 destination %s embeds a non-global IPv4 address", ErrUnsupportedDstIP, destination)
 	}
 
 	// Only the source may fall back to the router address, so the destination must always be mappable.
-	if !t.hasIPv6ToIPv4Mapping(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrUnsupportedDstIP, ip.DstIP)
+	if !destinationMapping.mappable() {
+		return nil, fmt.Errorf("%w: IPv6 destination %s is not mappable", ErrUnsupportedDstIP, destination)
 	}
 
-	if t.isIllegalIPv4Embedded(ip.SrcIP) {
-		return nil, fmt.Errorf("%w: IPv6 source %s embeds an illegal IPv4 address", ErrUnsupportedSrcIP, ip.SrcIP)
+	if isIllegalIPv4Embedded(sourceMapping) {
+		return nil, fmt.Errorf("%w: IPv6 source %s embeds an illegal IPv4 address", ErrUnsupportedSrcIP, source)
 	}
 
-	if t.isIllegalIPv4Embedded(ip.DstIP) {
-		return nil, fmt.Errorf("%w: IPv6 destination %s embeds an illegal IPv4 address", ErrUnsupportedDstIP, ip.DstIP)
+	if isIllegalIPv4Embedded(destinationMapping) {
+		return nil, fmt.Errorf("%w: IPv6 destination %s embeds an illegal IPv4 address", ErrUnsupportedDstIP, destination)
+	}
+
+	ipv4Source := sourceMapping.ipv4
+	if !sourceMapping.mappable() {
+		// Else, special case: use our ipv4 router address as we cannot translate
+		ipv4Source = t.ipv4RouterAddress
 	}
 
 	// A quoted packet is not sent, so it only needs to be translated.
@@ -156,11 +166,11 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 		// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the
 		// error."
 		if isZeroUDPChecksum(payload, protocol) {
-			return nil, zeroUDPChecksumError(ip.SrcIP, ip.DstIP, payload)
+			return nil, zeroUDPChecksumError(source, destination, payload)
 		}
 
 		// Validate transport checksums
-		pseudoHeader := ipv6PseudoHeader(ip.SrcIP, ip.DstIP, protocol, len(payload))
+		pseudoHeader := ipv6PseudoHeader(source, destination, protocol, len(payload))
 		if !validTransportChecksum(pseudoHeader, protocol, payload) {
 			return nil, fmt.Errorf("%w: invalid IPv6 transport checksum", ErrInvalidPacket)
 		}
@@ -177,6 +187,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	}
 
 	// Create a new IPv4 packet that matches the IPv6 Packet without any payload
+	translatedSource, translatedDestination := layerAddresses(ipv4Source, destinationMapping.ipv4)
 	ipv4 := &layers.IPv4{
 		Version:    4,
 		IHL:        5, // 5 (no IPv4 options)
@@ -187,8 +198,8 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 		FragOffset: 0, // Set from the IPv6 Fragment Header when present
 		TTL:        ttl,
 		Protocol:   protocol,
-		SrcIP:      t.mapIPv6ToIPv4(ip.SrcIP),
-		DstIP:      t.mapIPv6ToIPv4(ip.DstIP),
+		SrcIP:      translatedSource,
+		DstIP:      translatedDestination,
 	}
 
 	fragmented := protocol == layers.IPProtocolIPv6Fragment
@@ -232,8 +243,8 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	// ===
 
 	length := int(ip.Length) - (offset - ipv6HeaderLength)
-	removed := ipv6PseudoHeader(ip.SrcIP, ip.DstIP, protocol, length)
-	added := ipv4PseudoHeader(ipv4.SrcIP, ipv4.DstIP, ipv4.Protocol, length)
+	removed := ipv6PseudoHeader(source, destination, protocol, length)
+	added := ipv4PseudoHeader(ipv4Source, destinationMapping.ipv4, ipv4.Protocol, length)
 
 	var dropped bool
 	options := completeOptions
@@ -261,7 +272,7 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 		}
 
 		// RFC 7915 Section 5.1: the Identification of an unfragmented packet comes from a generator at the translator.
-		ipv4.Id = t.identifications.next(ipv4.SrcIP, ipv4.DstIP)
+		ipv4.Id = t.identifications.next(ipv4Source, destinationMapping.ipv4)
 		ipv4.Length = uint16(ipv4HeaderLength + len(payload))
 	}
 

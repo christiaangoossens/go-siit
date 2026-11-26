@@ -2,6 +2,7 @@ package siit
 
 import (
 	"net"
+	"net/netip"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -38,11 +39,47 @@ func serializePacket(options gopacket.SerializeOptions, header gopacket.Serializ
 	return buffer.Bytes()
 }
 
-func getBit(address net.IP, bitIndex int) byte {
+// ipv4Addr converts an address of a decoded IPv4 layer. It is invalid when it is not an IPv4 address.
+func ipv4Addr(ip net.IP) netip.Addr {
+	address, _ := netip.AddrFromSlice(ip)
+	if address = address.Unmap(); !address.Is4() {
+		return netip.Addr{}
+	}
+
+	return address
+}
+
+// ipv6Addr converts an address of a decoded IPv6 layer. It is invalid when it is not an IPv6 address.
+func ipv6Addr(ip net.IP) netip.Addr {
+	if len(ip) != net.IPv6len {
+		return netip.Addr{}
+	}
+
+	return netip.AddrFrom16([16]byte(ip))
+}
+
+// layerAddresses returns two addresses of the same family as slices for a gopacket layer, with one allocation.
+func layerAddresses(source, destination netip.Addr) (net.IP, net.IP) {
+	if source.Is4() {
+		sourceBytes, destinationBytes := source.As4(), destination.As4()
+		addresses := make(net.IP, 2*net.IPv4len)
+		copy(addresses, sourceBytes[:])
+		copy(addresses[net.IPv4len:], destinationBytes[:])
+		return addresses[:net.IPv4len:net.IPv4len], addresses[net.IPv4len:]
+	}
+
+	sourceBytes, destinationBytes := source.As16(), destination.As16()
+	addresses := make(net.IP, 2*net.IPv6len)
+	copy(addresses, sourceBytes[:])
+	copy(addresses[net.IPv6len:], destinationBytes[:])
+	return addresses[:net.IPv6len:net.IPv6len], addresses[net.IPv6len:]
+}
+
+func getBit(address []byte, bitIndex int) byte {
 	return address[bitIndex/8] >> uint(7-bitIndex%8) & 1
 }
 
-func setBit(address net.IP, bitIndex int, value byte) {
+func setBit(address []byte, bitIndex int, value byte) {
 	mask := byte(1 << uint(7-bitIndex%8))
 	if value != 0 {
 		address[bitIndex/8] |= mask
