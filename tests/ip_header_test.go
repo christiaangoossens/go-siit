@@ -594,7 +594,7 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 // RFC 7915 Section 4.5: "translators MUST forward all transport protocols"
 //
 // Deviation (docs/rfc-deviations.md): these rejections break that MUST. ICMP of the other family is rejected as well:
-// ICMPv6 (58) in IPv4, and ICMPv4 (1) in IPv6, also behind a Hop-by-Hop header.
+// ICMPv6 (58) in IPv4, and ICMPv4 (1) in IPv6, also behind a Hop-by-Hop or Fragment header.
 func TestTranslateRejectsProtocolNumbersOfTheOtherFamily(t *testing.T) {
 	translate := func(t *testing.T, protocol layers.IPProtocol, flags layers.IPv4Flag) (translation, error) {
 		t.Helper()
@@ -641,26 +641,34 @@ func TestTranslateRejectsProtocolNumbersOfTheOtherFamily(t *testing.T) {
 		})
 	}
 	for _, test := range []struct {
-		name     string
-		hopByHop bool
+		name    string
+		first   layers.IPProtocol
+		headers []byte
 	}{
-		{"alone", false},
-		{"behind a Hop-by-Hop header", true},
+		{"alone", layers.IPProtocolICMPv4, nil},
+		{"behind a Hop-by-Hop header", layers.IPProtocolIPv6HopByHop, optionsHeader(layers.IPProtocolICMPv4)},
+		{"behind a Fragment header", layers.IPProtocolIPv6Fragment, []byte{byte(layers.IPProtocolICMPv4), 0, 0, 0, 0, 0, 0x12, 0x34}},
+		{"behind a Routing header with segments left", layers.IPProtocolIPv6Routing, routingHeader(layers.IPProtocolICMPv4, 1)},
 	} {
 		t.Run("IPv6 Next Header 1 "+test.name, func(t *testing.T) {
 			message := []byte{echoRequest, 0, 0, 0, 0, 1, 0, 1, 'h', 'i'}
 			pseudoHeader := cat(ipv6Source, ipv6Dest, []byte{0, 0, 0, byte(len(message)), 0, 0, 0, byte(layers.IPProtocolICMPv4)})
 			binary.BigEndian.PutUint16(message[icmpChecksumOffset:], checksum(cat(pseudoHeader, message)))
-			first, headers := layers.IPProtocolICMPv4, []byte(nil)
-			if test.hopByHop {
-				first, headers = layers.IPProtocolIPv6HopByHop, optionsHeader(layers.IPProtocolICMPv4)
-			}
+			result, err := translateIPv6(t, testTranslator(), ipv6PacketWithHeaders(t, test.first, test.headers, message))
 
-			result, err := translateIPv6(t, testTranslator(), ipv6PacketWithHeaders(t, first, headers, message))
-
-			if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.packet != nil {
-				t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.packet))
+			if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.packet != nil || result.reply != nil {
+				t.Fatalf("got err=%v, packet length %d and reply length %d, want ErrUnsupportedProtocol without a reply", err, len(result.packet), len(result.reply))
 			}
 		})
 	}
+
+	// A Fragment header that is cut off is invalid, whatever its first octet says.
+	t.Run("IPv6 truncated Fragment header holding Next Header 1", func(t *testing.T) {
+		input := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Fragment, nil, []byte{byte(layers.IPProtocolICMPv4), 0, 0, 0})
+
+		result, err := translateIPv6(t, testTranslator(), input)
+		if !errors.Is(err, siit.ErrInvalidPacket) || result.packet != nil {
+			t.Fatalf("got err=%v, packet length %d, want ErrInvalidPacket", err, len(result.packet))
+		}
+	})
 }

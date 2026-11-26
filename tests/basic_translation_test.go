@@ -201,7 +201,8 @@ func TestTranslateEnforcesMTU(t *testing.T) {
 				}
 				var input gopacket.Packet
 				if test.fragmented {
-					ip.Flags = layers.IPv4MoreFragments
+					// A last fragment, because only that one may have a length that is not a multiple of 8 octets.
+					ip.FragOffset = 1
 					input = gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.size-ipv4HeaderLength))), layers.LayerTypeIPv4, gopacket.Default)
 				} else {
 					udp := &layers.UDP{SrcPort: testSourcePort, DstPort: testUDPDestinationPort}

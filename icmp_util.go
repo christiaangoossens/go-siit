@@ -77,11 +77,16 @@ func (t *Translator) translateQuotedIPv4(data []byte) []byte {
 
 // translateQuotedIPv6 translates the packet quoted in an ICMPv6 error (RFC 7915 Section 5.3), nil if it is dropped.
 func (t *Translator) translateQuotedIPv6(data []byte) []byte {
-	// A decode error is ignored on purpose: translateIPv6 validates the header itself.
-	var ip layers.IPv6
-	_ = ip.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
+	var ip *layers.IPv6
+	if isEmptyIPv6(data) {
+		ip = emptyIPv6Layer(data)
+	} else {
+		// A decode error is ignored on purpose: translateIPv6 validates the header itself.
+		ip = &layers.IPv6{}
+		_ = ip.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
+	}
 
-	translated, err := t.translateIPv6(&ip, true)
+	translated, err := t.translateIPv6(ip, true)
 	if err != nil {
 		return nil
 	}

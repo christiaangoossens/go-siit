@@ -76,11 +76,11 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		return nil, fmt.Errorf("%w: non-global IPv4 destination %s cannot use the Well-Known Prefix", ErrUnsupportedDstIP, destination)
 	}
 
-	// IPv6 extension headers have no IPv4 equivalent. Forwarding their protocol numbers would make the receiver
-	// parse the payload as an extension header.
+	// IPv6 extension headers and ICMPv6 have no IPv4 equivalent. Forwarding their protocol numbers would make the
+	// receiver parse the payload as something it is not.
 	switch ip.Protocol {
-	case layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Fragment, layers.IPProtocolIPv6Destination:
-		return nil, fmt.Errorf("%w: IPv4 protocol %d is an IPv6 extension header", ErrUnsupportedProtocol, ip.Protocol)
+	case layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Fragment, layers.IPProtocolIPv6Destination, layers.IPProtocolICMPv6:
+		return nil, fmt.Errorf("%w: IPv4 protocol %d belongs to IPv6", ErrUnsupportedProtocol, ip.Protocol)
 	}
 
 	// ===
@@ -98,6 +98,12 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		maxIPv4PacketLength := t.maxIPv4PacketLength(fragmented)
 		if uint32(ip.Length) > maxIPv4PacketLength {
 			return nil, fmt.Errorf("%w: IPv4 packet length %d exceeds %d bytes", ErrPacketOversized, ip.Length, maxIPv4PacketLength)
+		}
+
+		// RFC 8200 Section 4.5 discards an IPv6 fragment with the M flag whose length is not a multiple of 8 octets, so
+		// such an IPv4 fragment cannot be translated either.
+		if ip.Flags&layers.IPv4MoreFragments != 0 && len(ip.Payload)%8 != 0 {
+			return nil, fmt.Errorf("%w: IPv4 fragment length %d is not a multiple of 8", ErrInvalidPacket, len(ip.Payload))
 		}
 
 		icmpError := ip.Protocol == layers.IPProtocolICMPv4 && ip.FragOffset == 0 && len(ip.Payload) > 0 && isICMPv4ErrorType(ip.Payload[0])
@@ -123,18 +129,13 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		// is present, then the packet MUST instead be discarded, and an ICMPv4
 		// "Destination Unreachable, Source Route Failed" (Type 3, Code 5) error
 		// message SHOULD be returned to the sender.
-		for _, option := range ip.Options {
-			// RFC 7915 Section 4.1 says an unexpired IPv4 source route MUST cause
-			// the packet to be discarded because IPv4 options are not translated.
-			// RFC 791 Section 3.1: the route is used up once its pointer lies beyond the option.
-			if (option.OptionType == 131 || option.OptionType == 137) && len(option.OptionData) > 0 && option.OptionData[0] <= option.OptionLength {
-				// RFC 1812 Section 4.3.2.7: no ICMP error in reply to an ICMP error, so such a packet is only discarded.
-				if icmpError {
-					return nil, fmt.Errorf("%w in an ICMPv4 error", ErrSourceRouteFailed)
-				}
-
-				return nil, withReply(ErrSourceRouteFailed, t.generateIPv4SourceRouteFailed(ip))
+		if hasUnexpiredSourceRoute(ip) {
+			// RFC 1812 Section 4.3.2.7: no ICMP error in reply to an ICMP error, so such a packet is only discarded.
+			if icmpError {
+				return nil, fmt.Errorf("%w in an ICMPv4 error", ErrSourceRouteFailed)
 			}
+
+			return nil, withReply(ErrSourceRouteFailed, t.generateIPv4SourceRouteFailed(ip))
 		}
 
 		// Check the transport checksum (skip if fragment)
@@ -143,6 +144,12 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 		if !fragmented && !isZeroUDPChecksum(ip.Payload, ip.Protocol) && !validTransportChecksum(pseudoHeader, ip.Protocol, ip.Payload) {
 			return nil, fmt.Errorf("%w: invalid IPv4 transport checksum", ErrInvalidPacket)
 		}
+	}
+
+	// A quoted packet is translated like a normal one (RFC 7915 Section 4.3), so a quote that would be discarded for
+	// its source route drops the ICMP error.
+	if quoted && hasUnexpiredSourceRoute(ip) {
+		return nil, fmt.Errorf("%w in a quoted packet", ErrSourceRouteFailed)
 	}
 
 	// ===
@@ -263,4 +270,16 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (Packet, error)
 	}
 
 	return result, nil
+}
+
+// hasUnexpiredSourceRoute reports whether a Loose (131) or Strict (137) Source Route option still has addresses left.
+// RFC 791 Section 3.1: the route is used up once its pointer lies beyond the option.
+func hasUnexpiredSourceRoute(ip *layers.IPv4) bool {
+	for _, option := range ip.Options {
+		if (option.OptionType == 131 || option.OptionType == 137) && len(option.OptionData) > 0 && option.OptionData[0] <= option.OptionLength {
+			return true
+		}
+	}
+
+	return false
 }

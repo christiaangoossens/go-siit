@@ -424,6 +424,14 @@ func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 			t.Fatalf("quoted IPv6 header was not translated to an IPv4 header with Total Length 20: %x", data)
 		}
 	})
+	t.Run("IPv6 quote of only a header, followed by bytes outside its Payload Length", func(t *testing.T) {
+		header := serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolTCP, HopLimit: quoteTTL, SrcIP: ipv6Source, DstIP: ipv6Dest})
+		quote := append(header, make([]byte, 20)...)
+		data := translateToICMPv4(t, testTranslator(), ipv6ICMPPacket(t, 1, 4, quote)).icmp.Payload
+		if len(data) != ipv4HeaderLength || binary.BigEndian.Uint16(data[2:4]) != ipv4HeaderLength {
+			t.Fatalf("bytes outside the Payload Length were quoted: %x", data)
+		}
+	})
 	t.Run("IPv6 quote of UDP", func(t *testing.T) {
 		quote := ipv6Segment(t, segmentUDP, eamHost1, eamHost2, quoteTTL).Data()
 		input := ipv6ICMPErrorPacket(t, eamHost2, eamHost1, icmpv6DestUnreachable, 4, zeroRestHeader(), quote)
@@ -492,12 +500,17 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	translateV6 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
 		return translateIPv6(t, translator, ipv6ICMPPacket(t, 1, 4, quote))
 	}
+	translatePacketTooBig := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
+		return translateIPv6(t, translator, ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypePacketTooBig, 0, icmpPointer(1280), quote))
+	}
 	ipv4QuoteWithProtocol := func(protocol layers.IPProtocol, payload []byte) []byte {
 		return serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: protocol, SrcIP: ipv4Source, DstIP: ipv4Dest}, gopacket.Payload(payload))
 	}
 	extensionPayload := cat(optionsHeader(layers.IPProtocolTCP), ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()[ipv4HeaderLength:])
 	icmpv6Echo := quotedEchoIPv6(t, layers.ICMPv6TypeEchoRequest)[ipv6HeaderLength:]
 	icmpv4Echo := quotedEchoIPv4(t, echoRequest)[ipv4HeaderLength:]
+	emptyQuoteWithData := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Destination, optionsHeader(layers.IPProtocolUDP), make([]byte, udpHeaderLength)).Data()
+	binary.BigEndian.PutUint16(emptyQuoteWithData[4:6], 0)
 	ipv6QuoteOfICMPv4 := serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv4, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}, gopacket.Payload(icmpv4Echo))
 	tests := []struct {
 		name       string
@@ -511,6 +524,9 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 		{"IPv6 error quoting a time exceeded", testTranslator(), translateV6, ipv6ICMPPacket(t, 3, 0, ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, defaultTTL).Data()).Data()},
 		{"IPv4 quote truncated inside the header", testTranslator(), translateV4, []byte{0x45, 0, 0, 20}},
 		{"IPv6 quote truncated inside the header", testTranslator(), translateV6, []byte{0x60, 0, 0, 0}},
+		{"IPv6 quote with Payload Length 0 followed by an extension header", testTranslator(), translateV6, emptyQuoteWithData},
+		{"IPv6 Packet Too Big quote truncated inside the header", testTranslator(), translatePacketTooBig, []byte{0x60, 0, 0, 0}},
+		{"IPv6 Packet Too Big quote with a truncated extension header", testTranslator(), translatePacketTooBig, ipv6PacketWithHeaders(t, layers.IPProtocolIPv6HopByHop, nil, []byte{byte(layers.IPProtocolTCP), 0, 1, 4}).Data()},
 		{"IPv4 quote with a wrong version", testTranslator(), translateV4, append([]byte{0x65}, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()[1:]...)},
 		{"IPv4 quote of ICMP without an ICMP header", testTranslator(), translateV4, serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest})},
 		{"IPv6 quote of ICMP without an ICMP header", testTranslator(), translateV6, serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest})},
@@ -685,6 +701,7 @@ func TestTranslateFragmentationNeededMTU(t *testing.T) {
 func TestTranslatePacketTooBigMTU(t *testing.T) {
 	fragment := []byte{byte(layers.IPProtocolTCP), 0, 0, 1, 0, 0, 0x43, 0x21}
 	quotedFragment := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Fragment, fragment, bytes.Repeat([]byte{7}, 32)).Data()
+	quotedFragmentBehindHopByHop := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6HopByHop, cat(optionsHeader(layers.IPProtocolIPv6Fragment), fragment), bytes.Repeat([]byte{7}, 32)).Data()
 	for _, test := range []struct {
 		name          string
 		translatorMTU uint32
@@ -700,6 +717,7 @@ func TestTranslatePacketTooBigMTU(t *testing.T) {
 		{name: "smaller than the configured MTU", translatorMTU: 1500, mtu: 1400, want: 1380},
 		{name: "huge", translatorMTU: 1500, mtu: 0xffffffff, want: 1480},
 		{name: "quote with a Fragment header", translatorMTU: 1500, mtu: 1400, quote: quotedFragment, want: 1372},
+		{name: "quote with a Fragment header behind Hop-by-Hop", translatorMTU: 1500, mtu: 1400, quote: quotedFragmentBehindHopByHop, want: 1372},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			quote := test.quote

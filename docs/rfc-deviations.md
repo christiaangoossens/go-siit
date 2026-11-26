@@ -80,13 +80,15 @@ Some examples in RFC 7757 Appendix B use documentation addresses (192.0.2.0/24) 
 
 RFC 7915 Section 5.2: "The MTU field MUST be adjusted for the difference between the IPv4 and IPv6 header sizes"
 
-An MTU below 1280 in an ICMPv6 Packet Too Big is first raised to 1280, so the ICMPv4 error reports 1260. IPv6 links never have a smaller MTU.
+An MTU below 1280 in an ICMPv6 Packet Too Big is first raised to 1280, so the ICMPv4 error reports 1260, or 1252 when the quoted packet has a Fragment header. IPv6 links never have a smaller MTU.
 
 ## Protocol numbers that belong to the other IP version
 
 RFC 7915 Section 4.5: "translators MUST forward all transport protocols"
 
 An IPv4 packet with protocol 0, 43, 44, 60 (IPv6 extension headers) or 58 (ICMPv6), and an IPv6 packet with Next Header 1 (ICMPv4), are rejected with `ErrUnsupportedProtocol`. The receiver would parse such a payload as something it is not.
+
+An ICMP error whose quoted packet is rejected this way, or whose quoted IPv4 packet has an unexpired source route, is dropped.
 
 ## Packets with a wrong checksum
 

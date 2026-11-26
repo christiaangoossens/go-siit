@@ -153,6 +153,22 @@ func TestTranslateForwardsNoNextHeader(t *testing.T) {
 	}
 }
 
+// An empty packet expires like any other: the Time Exceeded reply quotes its 40-octet header.
+func TestTranslateExpiredEmptyIPv6Packet(t *testing.T) {
+	input := withHopLimit(t, ipv6PacketWithHeaders(t, layers.IPProtocolNoNextHeader, nil, nil), 1)
+
+	result, err := translateIPv6(t, testTranslator(), input)
+	if !errors.Is(err, siit.ErrTimeExceeded) || result.reply == nil {
+		t.Fatalf("got err=%v and a reply of %d octets, want ErrTimeExceeded with a reply", err, len(result.reply))
+	}
+
+	reply := gopacket.NewPacket(result.reply, layers.LayerTypeIPv6, gopacket.Default)
+	icmp, _ := reply.Layer(layers.LayerTypeICMPv6).(*layers.ICMPv6)
+	if icmp == nil || icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeTimeExceeded, 0) || !bytes.Equal(icmp.Payload[4:], input.Data()) {
+		t.Fatalf("reply is not a Time Exceeded quoting the packet: %v", reply)
+	}
+}
+
 // RFC 7915 Section 4.2 (SHOULD): "IGMP messages are single-hop messages and SHOULD be silently dropped by the
 // translator."
 func TestTranslateDropsIGMP(t *testing.T) {

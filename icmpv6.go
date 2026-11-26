@@ -2,6 +2,8 @@ package siit
 
 import (
 	"encoding/binary"
+
+	"github.com/google/gopacket/layers"
 )
 
 // RFC 7915 Sections 5.2 and 5.3 (ICMPv6 to ICMPv4)
@@ -71,16 +73,22 @@ func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 		// Packet Too Big
 		// Translate to an ICMPv4 Destination
 		//  Unreachable (Type 3) with Code 4
+		//
+		// RFC 7915 Section 5.2 (MUST): "The MTU field MUST be adjusted for the difference between the IPv4 and IPv6 header
+		// sizes, taking into account whether or not the packet in error includes a Fragment Header"
+		//
 		// RFC 4443 Section 3.2: the Code is ignored by the receiver.
-		// RFC 4443 stores Packet Too Big's four-byte MTU at the start of its body.
-		// RFC 7915 Section 5.2: the MTU loses the difference between the IPv6 and IPv4 header, limited by our own IPv6 MTU.
-		mtu := min(max(binary.BigEndian.Uint32(icmpv6Payload), ipv6MinimumMTU), t.mtu) - (ipv6HeaderLength - ipv4HeaderLength)
+		// RFC 4443 stores Packet Too Big's four-byte MTU at the start of its body. The MTU is also limited by our own IPv6
+		// MTU, and a quoted Fragment header is 8 more octets that the IPv4 packet does not carry.
+		headerDifference := uint32(ipv6HeaderLength - ipv4HeaderLength)
+		if hasIPv6FragmentHeader(payload[icmpErrorHeaderLength:]) {
+			headerDifference += ipv6FragmentHeaderLength
+		}
+
+		mtu := min(max(binary.BigEndian.Uint32(icmpv6Payload), ipv6MinimumMTU), t.mtu) - headerDifference
 		return t.translateICMPv6Error(payload, 3, 4, min(mtu, 0xffff))
 	case 3:
 		// Time Exceeded
-		if code > 1 {
-			return nil, false
-		}
 		return t.translateICMPv6Error(payload, 11, code, 0)
 	case 4:
 		// Parameter Problem (Type 4)
@@ -113,6 +121,24 @@ func (t *Translator) translateICMPv6(payload []byte) ([]byte, bool) {
 		// Other ICMPv6 information & error types:  Silently drop.
 		return nil, true
 	}
+}
+
+// hasIPv6FragmentHeader reports whether a (quoted) IPv6 packet has a Fragment header, possibly behind Hop-by-Hop,
+// Routing or Destination Options headers.
+func hasIPv6FragmentHeader(packet []byte) bool {
+	if len(packet) < ipv6HeaderLength {
+		return false
+	}
+
+	protocol, rest := layers.IPProtocol(packet[6]), packet[ipv6HeaderLength:]
+	for isSkippedIPv6Extension(protocol) {
+		var ok bool
+		if protocol, rest, ok = skipIPv6Extension(rest); !ok {
+			return false
+		}
+	}
+
+	return protocol == layers.IPProtocolIPv6Fragment
 }
 
 // translateICMPv6Error builds the ICMPv4 error around the translated quote, RFC 4884 extensions go to Types 3 and 11.
