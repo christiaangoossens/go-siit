@@ -198,6 +198,31 @@ func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 	}
 }
 
+// RFC 8200 Section 3: octets after the Payload Length are not translated, also behind a Hop-by-Hop header.
+func TestTranslateIPv6IgnoresOctetsAfterPayloadLength(t *testing.T) {
+	segment := ipv6TCPPacket(t, defaultTTL).Data()[ipv6HeaderLength:]
+	tests := []struct {
+		name    string
+		first   layers.IPProtocol
+		headers []byte
+	}{
+		{name: "without extension headers", first: layers.IPProtocolTCP},
+		{name: "behind a hop-by-hop header", first: layers.IPProtocolIPv6HopByHop, headers: optionsHeader(layers.IPProtocolTCP)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := cat(ipv6PacketWithHeaders(t, test.first, test.headers, segment).Data(), bytes.Repeat([]byte{0x5a}, 8))
+			result, err := translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
+			if err != nil {
+				t.Fatalf("translation failed: %v", err)
+			}
+			if len(result.packet) != ipv4HeaderLength+len(segment) {
+				t.Fatalf("translated packet is %d octets, want %d", len(result.packet), ipv4HeaderLength+len(segment))
+			}
+		})
+	}
+}
+
 // RFC 7915 Section 5.1 (MUST) with RFC 4443 Section 2.4 (e): an ICMPv6 error behind a Routing header with
 // Segments Left > 0 is not translated, but it must not be answered with a Parameter Problem either. Regression
 // guard: this case used to generate the Parameter Problem.

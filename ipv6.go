@@ -61,6 +61,14 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 	if ip.HopByHop != nil {
 		// gopacket already decoded a leading Hop-by-Hop header as part of the IPv6 layer.
 		protocol, offset = ip.HopByHop.NextHeader, offset+ip.HopByHop.ActualLength
+
+		// gopacket cuts the payload behind the Hop-by-Hop header to the Payload Length, which includes that header.
+		end := int(ip.Length) - ip.HopByHop.ActualLength
+		if end < 0 {
+			return translated, fmt.Errorf("%w: IPv6 Payload Length is shorter than the Hop-by-Hop header", ErrInvalidPacket)
+		}
+
+		payload = payload[:min(len(payload), end)]
 	}
 
 	// Get the actual contents, skip over any IPv6 extensions (as per RFC 7915, section 1.2)

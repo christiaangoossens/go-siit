@@ -318,6 +318,8 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 		{"IPv4 quote truncated inside the header", testTranslator(), translateV4, []byte{0x45, 0, 0, 20}},
 		{"IPv6 quote truncated inside the header", testTranslator(), translateV6, []byte{0x60, 0, 0, 0}},
 		{"IPv4 quote with a wrong version", testTranslator(), translateV4, append([]byte{0x65}, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()[1:]...)},
+		{"IPv4 quote of ICMP without an ICMP header", testTranslator(), translateV4, serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest})},
+		{"IPv6 quote of ICMP without an ICMP header", testTranslator(), translateV6, serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest})},
 		{"IPv4 quote with an illegal source (WKP)", testTranslator(), translateV4, ipv4Segment(t, segmentTCP, net.ParseIP("10.1.2.3").To4(), ipv4Dest, defaultTTL).Data()},
 		{"IPv4 quote with an illegal destination (WKP)", testTranslator(), translateV4, ipv4Segment(t, segmentTCP, ipv4Source, net.ParseIP("127.0.0.1").To4(), defaultTTL).Data()},
 		{"IPv4 quote with an illegal source (NSP)", nsp, translateV4, ipv4Segment(t, segmentTCP, net.ParseIP("224.0.0.1").To4(), ipv4Dest, defaultTTL).Data()},

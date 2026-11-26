@@ -54,8 +54,13 @@ func translateTransport(protocol layers.IPProtocol, payload, removed, added []by
 		}
 		binary.BigEndian.PutUint16(result[offset:], checksum)
 	case layers.IPProtocolICMPv4, layers.IPProtocolICMPv6:
+		if len(result) < 4 {
+			// Too short for the type, code and checksum.
+			return nil, true
+		}
+
 		newType, ok := translatedEchoType(result[0])
-		if !ok || len(result) < 4 {
+		if !ok {
 			// An ICMP error quoting an ICMP error is dropped.
 			return nil, true
 		}
