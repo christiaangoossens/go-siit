@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 const (
@@ -23,9 +24,15 @@ var (
 	partialOptions = gopacket.SerializeOptions{ComputeChecksums: true}
 )
 
-func serializeTranslatedPacket(options gopacket.SerializeOptions, srcIP, dstIP net.IP, packetLayers ...gopacket.SerializableLayer) TranslatedPacket {
-	buffer := gopacket.NewSerializeBuffer()
-	if err := gopacket.SerializeLayers(buffer, options, packetLayers...); err != nil {
+// serializeTranslatedPacket writes the IP header in front of the payload.
+func serializeTranslatedPacket(options gopacket.SerializeOptions, srcIP, dstIP net.IP, header gopacket.SerializableLayer, payload []byte) TranslatedPacket {
+	headerLength := ipv4HeaderLength
+	if header.LayerType() == layers.LayerTypeIPv6 {
+		headerLength = ipv6HeaderLength
+	}
+
+	buffer := gopacket.NewSerializeBufferExpectedSize(headerLength, len(payload))
+	if err := gopacket.SerializeLayers(buffer, options, header, gopacket.Payload(payload)); err != nil {
 		log.Printf("Failed to serialize packet: %v", err)
 		return TranslatedPacket{SrcIP: srcIP, DstIP: dstIP}
 	}

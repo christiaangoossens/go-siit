@@ -221,7 +221,7 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPack
 		return translated, nil
 	}
 
-	result := serializeTranslatedPacket(options, ipv6.SrcIP, ipv6.DstIP, ipv6, gopacket.Payload(payload))
+	result := serializeTranslatedPacket(options, ipv6.SrcIP, ipv6.DstIP, ipv6, payload)
 	if result.Packet == nil {
 		return result, fmt.Errorf("%w: failed to serialize IPv6 packet", ErrInvalidPacket)
 	}

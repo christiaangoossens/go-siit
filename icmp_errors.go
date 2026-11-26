@@ -3,7 +3,6 @@ package siit
 import (
 	"slices"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
@@ -27,7 +26,7 @@ func (t *Translator) generateIPv6ParameterProblem(ip *layers.IPv6, pointer uint3
 		invoking = slices.Concat(ip.Contents, ip.HopByHop.Contents, ip.Payload)
 	}
 	message := newICMPv6(outer, 4, 0, pointer, invoking[:min(len(invoking), ipv6ICMPErrorPayloadMaximum)])
-	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, gopacket.Payload(message))
+	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, message)
 }
 
 func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket {
@@ -43,7 +42,7 @@ func (t *Translator) generateIPv6TimeExceeded(ip *layers.IPv4) TranslatedPacket 
 	}
 
 	message := newICMPv6(outer, 3, 0, 0, quote[:min(len(quote), ipv6ICMPErrorPayloadMaximum)])
-	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, gopacket.Payload(message))
+	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, message)
 }
 
 func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket {
@@ -62,7 +61,7 @@ func (t *Translator) generateIPv4TimeExceeded(ip *layers.IPv6) TranslatedPacket 
 	}
 
 	message := newICMPv4(11, 0, 0, quote[:min(len(quote), ipv4ICMPErrorPayloadMaximum)])
-	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, gopacket.Payload(message))
+	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, message)
 }
 
 func (t *Translator) generateIPv4SourceRouteFailed(ip *layers.IPv4) TranslatedPacket {
@@ -73,5 +72,5 @@ func (t *Translator) generateIPv4SourceRouteFailed(ip *layers.IPv4) TranslatedPa
 
 	quote := slices.Concat(ip.Contents, ip.Payload[:min(len(ip.Payload), icmpErrorQuoteLength)])
 	message := newICMPv4(3, 5, 0, quote)
-	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, gopacket.Payload(message))
+	return serializeTranslatedPacket(completeOptions, outer.SrcIP, outer.DstIP, outer, message)
 }

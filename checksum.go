@@ -53,6 +53,8 @@ func adjustChecksum(checksum uint16, removed, added []byte) uint16 {
 	return ^uint16(sum)
 }
 
+// Kept small enough to inline, so the header is allocated on the caller's stack.
+
 // The ICMPv4 checksum has no pseudo-header (RFC 792).
 func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
 	if protocol == layers.IPProtocolICMPv4 {
@@ -60,21 +62,29 @@ func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, le
 	}
 
 	header := make([]byte, 12)
+	fillIPv4PseudoHeader(header, source, destination, protocol, length)
+	return header
+}
+
+func fillIPv4PseudoHeader(header []byte, source, destination net.IP, protocol layers.IPProtocol, length int) {
 	copy(header[0:4], source.To4())
 	copy(header[4:8], destination.To4())
 	header[9] = byte(protocol)
 	binary.BigEndian.PutUint16(header[10:12], uint16(length))
-	return header
 }
 
 // RFC 8200 Section 8.1
 func ipv6PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
 	header := make([]byte, 40)
+	fillIPv6PseudoHeader(header, source, destination, protocol, length)
+	return header
+}
+
+func fillIPv6PseudoHeader(header []byte, source, destination net.IP, protocol layers.IPProtocol, length int) {
 	copy(header[0:16], source.To16())
 	copy(header[16:32], destination.To16())
 	binary.BigEndian.PutUint32(header[32:36], uint32(length))
 	header[39] = byte(protocol)
-	return header
 }
 
 func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
