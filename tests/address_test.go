@@ -1,8 +1,10 @@
 package siit_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -21,8 +23,8 @@ const (
 func requireAddressMapping(t *testing.T, translator *siit.Translator, ipv4, ipv6 net.IP, direction int) {
 	t.Helper()
 	if direction != ipv6ToIPv4Only {
-		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return translator.TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4), siit.TranslationOverrides{})
+		result := mustTranslate(t, func() (translation, error) {
+			return translateIPv4(t, translator, ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4))
 		})
 		ip := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 		if !ip.SrcIP.Equal(ipv6) || !ip.DstIP.Equal(ipv6) {
@@ -30,8 +32,8 @@ func requireAddressMapping(t *testing.T, translator *siit.Translator, ipv4, ipv6
 		}
 	}
 	if direction != ipv4ToIPv6Only {
-		result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-			return translator.TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6, ipv6), siit.TranslationOverrides{})
+		result := mustTranslate(t, func() (translation, error) {
+			return translateIPv6(t, translator, ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6, ipv6))
 		})
 		ip := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 		if !ip.SrcIP.Equal(ipv4) || !ip.DstIP.Equal(ipv4) {
@@ -56,9 +58,11 @@ func embedIPv4(prefix net.IP, length int, ipv4 net.IP) net.IP {
 	return address
 }
 
-// RFC 6052 Sections 2.2 and 2.3 (MUST): an IPv4 address is embedded in, and extracted from, an IPv6 address
-// according to the prefix length (32, 40, 48, 56, 64 or 96), with the "u" octet (bits 64-71) skipped and a zero
-// suffix. The first address is the example of Section 2.4, Table 1; the others come from a reference implementation.
+// RFC 6052 Section 2.2: "The prefixes can only have one of the following lengths: 32, 40, 48, 56, 64, or 96."
+//
+// RFC 6052 Section 2.2 (MUST): "Bits 64 to 71 of the address are reserved ... These bits MUST be set to zero."
+//
+// The IPv4 address is embedded as in the figure of RFC 6052 Section 2.2. The first address is the example of RFC 6052 Section 2.4, Table 1; the others come from a reference implementation.
 func TestRFC6052AddressFormat(t *testing.T) {
 	tests := []struct {
 		prefix  string
@@ -99,10 +103,10 @@ func TestRFC6052AddressFormat(t *testing.T) {
 	}
 }
 
-// RFC 6052 Section 3.1 (MUST for the Well-Known Prefix): the Well-Known Prefix is not used for non-global IPv4
-// addresses, and a packet in which either address is a Well-Known Prefix address with a non-global IPv4 address is
-// dropped. The matrix includes the neighbours of each range, which must still be translated. A Network-Specific
-// Prefix has no such restriction (it still refuses addresses that can never be unicast hosts).
+// RFC 6052 Section 3.1 (MUST NOT): "Address translators MUST NOT translate packets in which an address is composed of
+// the Well-Known Prefix and a non-global IPv4 address; they MUST drop these packets."
+//
+// The neighbours of each range must still be translated. A Network-Specific Prefix has no such restriction.
 func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 	tests := []struct {
 		address string
@@ -125,26 +129,26 @@ func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 		ipv4 := net.ParseIP(test.address).To4()
 		wellKnown := expectedMappedAddress(ipv4)
 		t.Run(test.address, func(t *testing.T) {
-			attempts := map[string]func() (siit.TranslatedPacket, error){
-				"IPv4 source": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4Dest), siit.TranslationOverrides{})
+			attempts := map[string]func() (translation, error){
+				"IPv4 source": func() (translation, error) {
+					return translateIPv4(t, testTranslator(), ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4, ipv4Dest))
 				},
-				"IPv4 destination": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv4(ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, ipv4), siit.TranslationOverrides{})
+				"IPv4 destination": func() (translation, error) {
+					return translateIPv4(t, testTranslator(), ipv4TCPPacketWithAddresses(t, defaultTTL, ipv4Source, ipv4))
 				},
-				"IPv6 source": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, wellKnown, ipv6Dest), siit.TranslationOverrides{})
+				"IPv6 source": func() (translation, error) {
+					return translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, defaultTTL, wellKnown, ipv6Dest))
 				},
-				"IPv6 destination": func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, wellKnown), siit.TranslationOverrides{})
+				"IPv6 destination": func() (translation, error) {
+					return translateIPv6(t, testTranslator(), ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, wellKnown))
 				},
 			}
 			for name, attempt := range attempts {
 				result, err := attempt()
-				if test.global && result.Packet == nil {
+				if test.global && result.packet == nil {
 					t.Errorf("%s: global address was not translated: %v", name, err)
 				}
-				if !test.global && result.Packet != nil {
+				if !test.global && result.packet != nil {
 					t.Errorf("%s: non-global address in the Well-Known Prefix was translated", name)
 				}
 			}
@@ -164,13 +168,24 @@ func TestTranslateIPv6WithoutMappingIsRejected(t *testing.T) {
 		"destination": ipv6TCPPacketWithAddresses(t, defaultTTL, ipv6Source, ipv6Unmappable),
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, err := testTranslator().TranslateIPv6(packet, siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), packet)
 			requireRejected(t, result, err)
 		})
 	}
 }
 
 // RFC 6052 Section 2.2 (SHOULD): "embedded IPv6 addresses where [suffix] bits are not zero SHOULD ignore" them.
+// Regression guard: an IPv4-mapped address (::ffff:0:0/96) is not inside a NAT64 prefix like ::/64 that shares its
+// leading bits. Otherwise ::ffff:8.8.8.8 would map to 0.255.255.8.
+func TestIPv4MappedAddressIsNotInTheNAT64Prefix(t *testing.T) {
+	destination := embedIPv4(net.ParseIP("::"), 64, ipv4Dest)
+	packet := ipv6TCPPacketWithAddresses(t, defaultTTL, net.ParseIP("::ffff:8.8.8.8"), destination)
+	result, err := translateIPv6(t, translatorWithPrefix(t, "::/64", nil), packet)
+	if !errors.Is(err, siit.ErrUnsupportedSrcIP) || result.packet != nil {
+		t.Fatalf("IPv4-mapped source returned err=%v, packet length %d, want ErrUnsupportedSrcIP", err, len(result.packet))
+	}
+}
+
 func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 	for _, prefix := range []string{"2001:db8::/32", "2001:db8:100::/40", "2001:db8:122::/48", "2001:db8:122:300::/56", "2001:db8:122:344::/64"} {
 		t.Run(prefix, func(t *testing.T) {
@@ -183,60 +198,87 @@ func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 	}
 }
 
-// RFC 6052 Sections 2.2 and 2.3 (MUST) and RFC 7757 Sections 3.1 and 3.2: the translator refuses configurations
-// that violate the specifications: unsupported prefix lengths, a /96 prefix with the reserved "u" octet set, a
-// missing or IPv6 router address, and EAM tables with conflicting or malformed entries.
+// RFC 6052 Section 2.2 (MUST): "When using a /96 Network-Specific Prefix, the administrators MUST ensure that the
+// bits 64 to 71 are set to zero."
+//
+// RFC 7757 Section 3.2 (MUST): "An EAM's IPv4 prefix value MUST have an identical or smaller number of suffix bits
+// than its corresponding IPv6 prefix value."
+//
+// The allowed prefix lengths are listed in RFC 6052 Section 2.2. The other rows (router address, duplicate or
+// malformed EAM entries) are local configuration checks.
 func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
-	parse := func(prefix string) *net.IPNet {
-		_, network, err := net.ParseCIDR(prefix)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return network
+	withPrefix := func(prefix netip.Prefix) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.NAT64Prefix = prefix
+		return config
 	}
-	wellKnown := parse("64:ff9b::/96")
+	withRouter := func(router netip.Addr) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.IPv4RouterAddress = router
+		return config
+	}
+	withTable := func(table rawEAMTable) siit.Config { return testConfig("64:ff9b::/96", table) }
+	eamEntry := func(ipv4Prefix, ipv6Prefix string) siit.EAMEntry {
+		return siit.EAMEntry{IPv4Prefix: netip.MustParsePrefix(ipv4Prefix), IPv6Prefix: netip.MustParsePrefix(ipv6Prefix)}
+	}
+	withEntry := func(entry siit.EAMEntry) siit.Config {
+		config := testConfig("64:ff9b::/96", nil)
+		config.EAMTable = siit.EAMTable{entry}
+		return config
+	}
 	tests := []struct {
 		name   string
-		prefix *net.IPNet
-		router net.IP
-		table  siit.RawEAMTable
+		config siit.Config
 	}{
-		{"nil prefix", nil, ipv4RouterAddress, nil},
-		{"prefix length 80", parse("64:ff9b::/80"), ipv4RouterAddress, nil},
-		{"prefix length 128", parse("64:ff9b::1/128"), ipv4RouterAddress, nil},
-		{"/96 prefix with a non-zero u octet", parse("2001:db8:122:344:ff00::/96"), ipv4RouterAddress, nil},
-		{"nil router", wellKnown, nil, nil},
-		{"IPv6 router", wellKnown, net.ParseIP("2001:db8::1"), nil},
-		{"duplicate IPv4 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:2::/56"}}},
-		{"duplicate IPv6 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1::/56"}}},
-		{"IPv4 suffix longer than IPv6 suffix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "10.0.0.0/8", IPv6Prefix: "2001:db8::/120"}}},
-		{"IPv6 prefix in IPv4 column", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "2001:db8::1", IPv6Prefix: "2001:db8::2"}}},
-		{"IPv4 prefix in IPv6 column", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "192.0.2.2"}}},
-		{"IPv4-mapped IPv6 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "::ffff:192.0.2.1"}}},
-		{"IPv4 prefix length too long", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1/33", IPv6Prefix: "2001:db8::1"}}},
-		{"IPv6 prefix length too long", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1/129"}}},
-		{"unparsable IPv4 prefix", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{IPv4Prefix: "not-an-address", IPv6Prefix: "2001:db8::1"}}},
-		{"empty entry", wellKnown, ipv4RouterAddress, siit.RawEAMTable{{}}},
+		{"no prefix", withPrefix(netip.Prefix{})},
+		{"prefix length 80", withPrefix(netip.MustParsePrefix("64:ff9b::/80"))},
+		{"prefix length 128", withPrefix(netip.MustParsePrefix("64:ff9b::1/128"))},
+		{"IPv4 prefix", withPrefix(netip.MustParsePrefix("192.0.2.0/24"))},
+		{"/96 prefix with a non-zero u octet", withPrefix(netip.MustParsePrefix("2001:db8:122:344:ff00::/96"))},
+		{"no router", withRouter(netip.Addr{})},
+		{"IPv6 router", withRouter(netip.MustParseAddr("2001:db8::1"))},
+		{"duplicate IPv4 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:2::/56"}})},
+		{"duplicate IPv6 prefix", withTable(rawEAMTable{{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"}, {IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1::/56"}})},
+		{"IPv4 suffix longer than IPv6 suffix", withEntry(eamEntry("10.0.0.0/8", "2001:db8::/120"))},
+		{"IPv6 prefix in IPv4 column", withEntry(eamEntry("2001:db8::1/128", "2001:db8::2/128"))},
+		{"IPv4 prefix in IPv6 column", withEntry(eamEntry("192.0.2.1/32", "192.0.2.2/32"))},
+		{"IPv4-mapped IPv6 prefix", withEntry(eamEntry("192.0.2.1/32", "::ffff:192.0.2.1/128"))},
+		{"empty entry", withEntry(siit.EAMEntry{})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := siit.NewTranslator(test.prefix, test.router, test.table); err == nil {
-				t.Fatal("invalid configuration was accepted")
+			if _, err := siit.NewTranslator(test.config); !errors.Is(err, siit.ErrInvalidConfig) {
+				t.Fatalf("got %v, want ErrInvalidConfig", err)
 			}
 		})
 	}
 	t.Run("equal suffix lengths are valid", func(t *testing.T) {
-		table := siit.RawEAMTable{{IPv4Prefix: "10.0.0.0/24", IPv6Prefix: "2001:db8::/120"}}
-		if _, err := siit.NewTranslator(wellKnown, ipv4RouterAddress, table); err != nil {
+		if _, err := siit.NewTranslator(withTable(rawEAMTable{{IPv4Prefix: "10.0.0.0/24", IPv6Prefix: "2001:db8::/120"}})); err != nil {
 			t.Fatalf("EAM with identical suffix lengths was rejected: %v", err)
+		}
+	})
+	t.Run("invalid EAM entries in text form", func(t *testing.T) {
+		for _, entry := range [][2]string{
+			{"192.0.2.1/33", "2001:db8::1"}, {"192.0.2.1", "2001:db8::1/129"}, {"not-an-address", "2001:db8::1"}, {"", ""},
+			{"10.0.0.0/8", "2001:db8::/120"}, {"2001:db8::1", "2001:db8::2"}, {"192.0.2.1", "192.0.2.2"}, {"192.0.2.1", "::ffff:192.0.2.1"},
+		} {
+			if _, err := siit.ParseEAMEntry(entry[0], entry[1]); !errors.Is(err, siit.ErrInvalidConfig) {
+				t.Fatalf("ParseEAMEntry(%q, %q) returned %v, want ErrInvalidConfig", entry[0], entry[1], err)
+			}
 		}
 	})
 }
 
-// RFC 7757 Sections 3.1-3.3 (MUST): the EAM table maps by longest-prefix match in either column, the host bits
-// are carried over (and excess IPv6 suffix bits are discarded on the way to IPv4), prefixes without a length are
-// single hosts, an address without an entry falls back to the RFC 6052 prefix, and every packet address is
-// translated independently. The first table is Figure 1 of the RFC.
+// RFC 7757 Section 3.2 (MUST): "The prefix length MAY be omitted, in which case the implementation MUST assume it to
+// be 32 for IPv4 and 128 for IPv6."
+//
+// RFC 7757 Section 3.2 (MUST): "an SIIT implementation MUST individually translate each IP address it encounters in
+// the packet's IP headers"
+//
+// RFC 7757 Section 3.3.1 (MUST): "If no matching EAM entry is found, the EAM algorithm is aborted. The SIIT
+// implementation MUST proceed to translate the address in accordance with [RFC6145] (and its updates)."
+//
+// The first table is Figure 1 of RFC 7757.
 func TestEAMMappings(t *testing.T) {
 	type mapping struct {
 		ipv4, ipv6 string
@@ -244,12 +286,12 @@ func TestEAMMappings(t *testing.T) {
 	}
 	tests := []struct {
 		name     string
-		table    siit.RawEAMTable
+		table    rawEAMTable
 		mappings []mapping
 	}{
 		{
 			name: "RFC 7757 Figure 1",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8:aaaa::"},
 				{IPv4Prefix: "192.0.2.2/32", IPv6Prefix: "2001:db8:bbbb::b/128"},
 				{IPv4Prefix: "192.0.2.16/28", IPv6Prefix: "2001:db8:cccc::/124"},
@@ -268,14 +310,14 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name:  "prefixes without a length are single hosts",
-			table: siit.RawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1"}},
+			table: rawEAMTable{{IPv4Prefix: "192.0.2.1", IPv6Prefix: "2001:db8::1"}},
 			mappings: []mapping{
 				{"192.0.2.1", "2001:db8::1", bothDirections},
 			},
 		},
 		{
 			name: "mixed prefix lengths",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"},
 				{IPv4Prefix: "198.51.100.129/32", IPv6Prefix: "2001:db8:2::/64"},
 			},
@@ -286,7 +328,7 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name: "more specific IPv4 prefix wins",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/56"},
 				{IPv4Prefix: "192.0.2.128/25", IPv6Prefix: "2001:db8:2::/64"},
 			},
@@ -297,7 +339,7 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name: "more specific IPv6 prefix wins",
-			table: siit.RawEAMTable{
+			table: rawEAMTable{
 				{IPv4Prefix: "192.0.2.0/24", IPv6Prefix: "2001:db8:1::/64"},
 				{IPv4Prefix: "198.51.100.0/24", IPv6Prefix: "2001:db8:1:0:8000::/72"},
 			},
@@ -310,14 +352,14 @@ func TestEAMMappings(t *testing.T) {
 		},
 		{
 			name:  "IPv6 suffix bits beyond the IPv4 host part are discarded",
-			table: siit.RawEAMTable{{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"}},
+			table: rawEAMTable{{IPv4Prefix: "192.0.2.128/26", IPv6Prefix: "2001:db8:dddd::/64"}},
 			mappings: []mapping{
 				{"192.0.2.152", "2001:db8:dddd:0:6000:beef::", ipv6ToIPv4Only},
 			},
 		},
 		{
 			name:  "addresses without an entry use the RFC 6052 prefix",
-			table: siit.RawEAMTable{{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"}},
+			table: rawEAMTable{{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"}},
 			mappings: []mapping{
 				{"1.1.1.1", "2001:db8::10", bothDirections},
 				{"2.2.2.2", "64:ff9b::202:202", bothDirections},
@@ -336,7 +378,7 @@ func TestEAMMappings(t *testing.T) {
 	}
 }
 
-// RFC 7757 Section 3.2 (MUST): the IPv4 and IPv6 prefixes of an EAM entry may have any of the lengths of RFC 6052.
+// Local: the IPv4 and IPv6 prefixes of an EAM entry may have any of the lengths of RFC 6052.
 func TestEAMSupportsRFC6052PrefixLengths(t *testing.T) {
 	for _, test := range []struct{ name, ipv4Prefix, ipv6Prefix, ipv4, ipv6 string }{
 		{"32", "192.0.2.0/0", "2001:db8::/32", "192.0.2.33", "2001:db8:c000:221::"},
@@ -347,7 +389,7 @@ func TestEAMSupportsRFC6052PrefixLengths(t *testing.T) {
 		{"96", "10.20.30.40/32", "2001:db8:1234:5678:9abc:def0::/96", "10.20.30.40", "2001:db8:1234:5678:9abc:def0::"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			translator := testTranslatorWithEAM(siit.RawEAMTable{{IPv4Prefix: test.ipv4Prefix, IPv6Prefix: test.ipv6Prefix}})
+			translator := testTranslatorWithEAM(rawEAMTable{{IPv4Prefix: test.ipv4Prefix, IPv6Prefix: test.ipv6Prefix}})
 			requireAddressMapping(t, translator, net.ParseIP(test.ipv4).To4(), net.ParseIP(test.ipv6), bothDirections)
 		})
 	}

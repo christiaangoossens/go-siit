@@ -1,8 +1,13 @@
 package siit_test
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
+	"net/netip"
+	"reflect"
+	"slices"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -55,35 +60,53 @@ const (
 	icmpv6DestUnreachable   = 1
 )
 
-func translatorWithPrefix(t *testing.T, prefix string, eamTable siit.RawEAMTable) *siit.Translator {
-	t.Helper()
-	_, nat64Net, err := net.ParseCIDR(prefix)
-	if err != nil {
-		t.Fatal(err)
+// rawEAMTable is an EAM table in text form, parsed with siit.ParseEAMEntry.
+type rawEAMTable []struct{ IPv4Prefix, IPv6Prefix string }
+
+func (table rawEAMTable) parse() (siit.EAMTable, error) {
+	var parsed siit.EAMTable
+	for _, entry := range table {
+		eam, err := siit.ParseEAMEntry(entry.IPv4Prefix, entry.IPv6Prefix)
+		if err != nil {
+			return nil, err
+		}
+		parsed = append(parsed, eam)
 	}
-	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
+	return parsed, nil
+}
+
+// testConfig returns the configuration of the test translators: the router address and the given prefix and table.
+func testConfig(prefix string, eamTable rawEAMTable) siit.Config {
+	table, err := eamTable.parse()
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
+	}
+	return siit.Config{
+		NAT64Prefix:       netip.MustParsePrefix(prefix),
+		IPv4RouterAddress: netip.AddrFrom4([4]byte(ipv4RouterAddress.To4())),
+		EAMTable:          table,
+	}
+}
+
+func newTestTranslator(config siit.Config) *siit.Translator {
+	translator, err := siit.NewTranslator(config)
+	if err != nil {
+		panic(err)
 	}
 	return translator
+}
+
+func translatorWithPrefix(t *testing.T, prefix string, eamTable rawEAMTable) *siit.Translator {
+	t.Helper()
+	return newTestTranslator(testConfig(prefix, eamTable))
 }
 
 func testTranslator() *siit.Translator {
 	return testTranslatorWithEAM(nil)
 }
 
-func testTranslatorWithEAM(eamTable siit.RawEAMTable) *siit.Translator {
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		panic(err)
-	}
-
-	translator, err := siit.NewTranslator(nat64Net, ipv4RouterAddress, eamTable)
-	if err != nil {
-		panic(err)
-	}
-
-	return translator
+func testTranslatorWithEAM(eamTable rawEAMTable) *siit.Translator {
+	return newTestTranslator(testConfig("64:ff9b::/96", eamTable))
 }
 
 func expectedMappedAddress(address net.IP) net.IP {
@@ -127,26 +150,142 @@ func checksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func mustTranslate(t *testing.T, translate func() (siit.TranslatedPacket, error)) []byte {
+// translation is the outcome of translating one packet. Tests only read this type, so a change to the library's
+// result types only changes translateIPv4, translateIPv6 and newTranslation.
+type translation struct {
+	// Translated packet, nil when the packet is dropped or rejected.
+	packet []byte
+
+	// ICMP error generated for the sender of the packet, nil when there is none.
+	reply []byte
+}
+
+// translateIPv4 translates the packet both from its bytes and from its decoded layer, and requires the same outcome.
+func translateIPv4(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
 	t.Helper()
-	packet, err := translate()
+	data := slices.Clone(packet.Data())
+	result, err := translator.TranslateIPv4(data)
+	requireUnchanged(t, data, packet.Data())
+
+	layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	var before layers.IPv4
+	if layer != nil {
+		before = *layer
+	}
+	layerResult, layerErr := translator.TranslateIPv4Layer(layer)
+	requireUnchanged(t, data, packet.Data())
+	if layer != nil && !reflect.DeepEqual(before, *layer) {
+		t.Fatal("the translator modified the IPv4 layer")
+	}
+
+	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
+	return newTranslation(result, err), err
+}
+
+func translateIPv6(t *testing.T, translator *siit.Translator, packet gopacket.Packet) (translation, error) {
+	t.Helper()
+	data := slices.Clone(packet.Data())
+	result, err := translator.TranslateIPv6(data)
+	requireUnchanged(t, data, packet.Data())
+
+	layer, _ := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+	var before layers.IPv6
+	if layer != nil {
+		before = *layer
+	}
+	layerResult, layerErr := translator.TranslateIPv6Layer(layer)
+	requireUnchanged(t, data, packet.Data())
+	if layer != nil && !reflect.DeepEqual(before, *layer) {
+		t.Fatal("the translator modified the IPv6 layer")
+	}
+
+	requireSameTranslation(t, newTranslation(result, err), err, newTranslation(layerResult, layerErr), layerErr)
+	return newTranslation(result, err), err
+}
+
+func newTranslation(result siit.Packet, err error) translation {
+	var reply []byte
+	var translationErr *siit.TranslationError
+	if errors.As(err, &translationErr) {
+		reply = translationErr.Reply
+	}
+
+	return translation{packet: result, reply: reply}
+}
+
+func requireUnchanged(t *testing.T, input, original []byte) {
+	t.Helper()
+	if !bytes.Equal(input, original) {
+		t.Fatal("the translator modified its input")
+	}
+}
+
+// requireSameTranslation compares the outcomes of the bytes and the layer entry points. The Identification of an
+// unfragmented IPv4 packet is generated per packet, so it and the header checksum are left out.
+func requireSameTranslation(t *testing.T, fromBytes translation, bytesErr error, fromLayer translation, layerErr error) {
+	t.Helper()
+	sameErr := rejectionReason(t, bytesErr) == rejectionReason(t, layerErr)
+	if !sameErr || !bytes.Equal(withoutIdentification(fromBytes.packet), withoutIdentification(fromLayer.packet)) || !bytes.Equal(fromBytes.reply, fromLayer.reply) {
+		t.Fatalf("bytes and layer translations differ: err=%v and err=%v", bytesErr, layerErr)
+	}
+}
+
+var rejectionSentinels = []error{
+	siit.ErrInvalidPacket, siit.ErrInvalidICMP, siit.ErrUnsupportedProtocol, siit.ErrTimeExceeded,
+	siit.ErrSourceRouteFailed, siit.ErrUnsupportedSrcIP, siit.ErrUnsupportedDstIP, siit.ErrPacketOversized,
+	siit.ErrZeroUDPChecksum,
+}
+
+// rejectionReason returns the sentinel that err wraps, nil for a nil error. A rejection must wrap exactly one.
+func rejectionReason(t *testing.T, err error) error {
+	t.Helper()
+	if err == nil {
+		return nil
+	}
+
+	var reasons []error
+	for _, sentinel := range rejectionSentinels {
+		if errors.Is(err, sentinel) {
+			reasons = append(reasons, sentinel)
+		}
+	}
+	if len(reasons) != 1 {
+		t.Fatalf("error %q wraps %d sentinels, want 1", err, len(reasons))
+	}
+	return reasons[0]
+}
+
+func withoutIdentification(packet []byte) []byte {
+	if len(packet) < ipv4HeaderLength || packet[0]>>4 != 4 {
+		return packet
+	}
+
+	packet = slices.Clone(packet)
+	clear(packet[4:6])
+	clear(packet[ipv4ChecksumOffset : ipv4ChecksumOffset+2])
+	return packet
+}
+
+func mustTranslate(t *testing.T, translate func() (translation, error)) []byte {
+	t.Helper()
+	result, err := translate()
 	if err != nil {
 		t.Fatalf("translation failed: %v", err)
 	}
-	return packet.Packet
+	return result.packet
 }
 
-func requireDropped(t *testing.T, result siit.TranslatedPacket, err error) {
+func requireDropped(t *testing.T, result translation, err error) {
 	t.Helper()
-	if err != nil || result.Packet != nil {
-		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result.Packet), err)
+	if err != nil || result.packet != nil {
+		t.Fatalf("packet was not silently dropped: result length=%d err=%v", len(result.packet), err)
 	}
 }
 
-func requireRejected(t *testing.T, result siit.TranslatedPacket, err error) {
+func requireRejected(t *testing.T, result translation, err error) {
 	t.Helper()
-	if err == nil || result.Packet != nil {
-		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result.Packet), err)
+	if err == nil || result.packet != nil {
+		t.Fatalf("packet was not rejected: result length=%d err=%v", len(result.packet), err)
 	}
 }
 
@@ -351,25 +490,12 @@ func tcpSegment(t *testing.T, network gopacket.NetworkLayer, payload []byte) []b
 
 func translatorWithMTU(t *testing.T, mtu uint32) *siit.Translator {
 	t.Helper()
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		t.Fatal(err)
-	}
-	translator, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, mtu)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return translator
+	config := testConfig("64:ff9b::/96", nil)
+	config.MTU = mtu
+	return newTestTranslator(config)
 }
 
 // ipv4EchoRequest builds an ICMPv4 Echo Request travelling from ipv4Source to ipv4Dest.
-func ipv4EchoRequest(t *testing.T, payload []byte) gopacket.Packet {
-	t.Helper()
-	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
-	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(echoRequest, 0)}
-	return gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
-}
-
 // Transport kinds understood by ipv4Segment and ipv6Segment.
 const (
 	segmentTCP  = "TCP"
@@ -508,8 +634,8 @@ type icmpv6Result struct {
 // translateToICMPv6 translates an IPv4 packet that must yield an ICMPv6 message with a valid checksum.
 func translateToICMPv6(t *testing.T, translator *siit.Translator, input gopacket.Packet) icmpv6Result {
 	t.Helper()
-	raw := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv4(input, siit.TranslationOverrides{})
+	raw := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, translator, input)
 	})
 	packet := gopacket.NewPacket(raw, layers.LayerTypeIPv6, gopacket.Default)
 	ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -537,8 +663,8 @@ type icmpv4Result struct {
 // translateToICMPv4 translates an IPv6 packet that must yield an ICMPv4 message with valid checksums.
 func translateToICMPv4(t *testing.T, translator *siit.Translator, input gopacket.Packet) icmpv4Result {
 	t.Helper()
-	raw := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv6(input, siit.TranslationOverrides{})
+	raw := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, translator, input)
 	})
 	packet := gopacket.NewPacket(raw, layers.LayerTypeIPv4, gopacket.Default)
 	ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)

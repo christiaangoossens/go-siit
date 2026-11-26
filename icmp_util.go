@@ -56,27 +56,35 @@ func newICMPv4(icmpType, code byte, rest uint32, data []byte) []byte {
 // newICMPv6 is like newICMPv4, but the checksum covers the pseudo-header of the IPv6 packet (RFC 4443 Section 2.3).
 func newICMPv6(ip *layers.IPv6, icmpType, code byte, rest uint32, data []byte) []byte {
 	message := append(binary.BigEndian.AppendUint32([]byte{icmpType, code, 0, 0}, rest), data...)
-	pseudoHeader := ipv6PseudoHeader(ip.SrcIP, ip.DstIP, layers.IPProtocolICMPv6, len(message))
+	pseudoHeader := ipv6PseudoHeader(ipv6Addr(ip.SrcIP), ipv6Addr(ip.DstIP), layers.IPProtocolICMPv6, len(message))
 	binary.BigEndian.PutUint16(message[2:], internetChecksum(pseudoHeader, message))
 	return message
 }
 
 // translateQuotedIPv4 translates the packet quoted in an ICMPv4 error (RFC 7915 Section 4.3), nil if it is dropped.
 func (t *Translator) translateQuotedIPv4(data []byte) []byte {
-	translated, err := t.TranslateIPv4(gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default), TranslationOverrides{QuotedPacket: true})
+	// A decode error is ignored on purpose: translateIPv4 validates the header itself.
+	var ip layers.IPv4
+	_ = ip.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
+
+	translated, err := t.translateIPv4(&ip, true)
 	if err != nil {
 		return nil
 	}
 
-	return translated.Packet
+	return translated
 }
 
 // translateQuotedIPv6 translates the packet quoted in an ICMPv6 error (RFC 7915 Section 5.3), nil if it is dropped.
 func (t *Translator) translateQuotedIPv6(data []byte) []byte {
-	translated, err := t.TranslateIPv6(gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default), TranslationOverrides{QuotedPacket: true})
+	// A decode error is ignored on purpose: translateIPv6 validates the header itself.
+	var ip layers.IPv6
+	_ = ip.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
+
+	translated, err := t.translateIPv6(&ip, true)
 	if err != nil {
 		return nil
 	}
 
-	return translated.Packet
+	return translated
 }

@@ -6,9 +6,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * RFC 7915 Sections 4.2 and 4.3 (ICMPv4 to ICMPv6)
- */
+// RFC 7915 Sections 4.2 and 4.3 (ICMPv4 to ICMPv6)
 
 // RFC 1191 Table 7-1: the MTU plateaus used when a router reports no next-hop MTU.
 var mtuPlateaus = []uint32{65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68}
@@ -90,7 +88,7 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 					}
 				}
 			}
-			mtu = min(mtu+ipv4HeaderLength, t.MTU)
+			mtu = min(mtu+ipv4HeaderLength, t.mtu)
 			if mtu < ipv6MinimumMTU {
 				// When translating, set the minimum to the IPv6 minimum.
 				mtu = ipv6MinimumMTU
@@ -101,7 +99,7 @@ func (t *Translator) translateICMPv4(ip *layers.IPv6, payload []byte) ([]byte, b
 			//   to destination).
 			newCode = 0
 		case 6, 7, 8:
-			// Code 6, 7, 8 (Destination Network/Host/Protocol Unknown):
+			// Code 6, 7, 8 (Destination Network/Host Unknown, Source Host Isolated):
 			// Set the Code to 0 (No route to destination).
 			newCode = 0
 		case 9, 10:

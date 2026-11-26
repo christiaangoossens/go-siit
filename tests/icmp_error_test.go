@@ -40,11 +40,10 @@ func requireQuotedTCPv4(t *testing.T, quote gopacket.Packet, source, destination
 	}
 }
 
-// RFC 7915 Sections 4.2 and 4.3 (MUST): every ICMPv4 error type and code is either translated as specified or
-// silently dropped, and the quoted packet is translated too, without decrementing its TTL.
-// Covered: Destination Unreachable codes 0-15 and 16, 255; Time Exceeded; Parameter Problem codes 0-3. Source Quench,
-// Redirect, Alternate Host, Router, Timestamp, Information, Address Mask and unknown types have no ICMPv6
-// equivalent and are dropped. Outer and quoted addresses, the quoted TTL and the quoted TCP checksum are checked.
+// RFC 7915 Section 4.2 (MUST): "all ICMPv4 packets MUST have the Type translated and, for ICMPv4 error messages, the
+// included IP header also MUST be translated."
+//
+// Types without an ICMPv6 equivalent are dropped.
 func TestTranslateICMPv4Messages(t *testing.T) {
 	const drop = 255
 	tests := []struct {
@@ -98,7 +97,7 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := ipv4ICMPPacket(t, test.icmpType, test.code, quote)
 			if test.wantType == drop {
-				result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+				result, err := translateIPv4(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -115,11 +114,12 @@ func TestTranslateICMPv4Messages(t *testing.T) {
 	}
 }
 
-// RFC 7915 Sections 5.2 and 5.3 (MUST), with RFC 4443 Sections 3.1-3.4: every ICMPv6 error type and code is either
-// translated as specified or silently dropped, and the quoted packet is translated too, without decrementing its
-// Hop Limit. Packet Too Big ignores its Code (RFC 4443 Section 3.2: "Set to 0 (zero) by the originator and ignored by the
-// receiver"); the rows "packet too big with code 1 / 255" are regression guards, as such a message used to be rejected.
-// MLD, Neighbor Discovery, Redirect and unknown types have no ICMPv4 equivalent and are dropped.
+// RFC 7915 Section 5.2 (MUST): "all ICMP packets MUST have the Type translated and, for ICMP error messages, the
+// included IP header MUST also be translated."
+//
+// RFC 4443 Section 3.2, Packet Too Big Code: "Set to 0 (zero) by the originator and ignored by the receiver"
+//
+// Types without an ICMPv4 equivalent are dropped. The rows "packet too big with code 1 / 255" are regression guards: such a message used to be rejected.
 func TestTranslateICMPv6Messages(t *testing.T) {
 	const drop = 255
 	tests := []struct {
@@ -172,7 +172,7 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 			}
 			input := ipv6ICMPPacketWithRestHeader(t, test.icmpType, test.code, rest, quote)
 			if test.wantType == drop {
-				result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+				result, err := translateIPv6(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -188,8 +188,9 @@ func TestTranslateICMPv6Messages(t *testing.T) {
 	}
 }
 
-// RFC 7915 Sections 4.3 and 5.3 (MUST): the TTL / Hop Limit of the quoted packet is not decremented and does not
-// expire the translation, even when it is 1 (as in traceroute) or 0.
+// RFC 7915 Section 5.3: "except that the TTL/Hop Limit value of the inner IPv4/IPv6 packet are not decremented"
+//
+// The quoted TTL / Hop Limit does not expire the translation either, even when it is 1 (as in traceroute) or 0.
 func TestTranslateICMPErrorWithExpiredQuotedPacket(t *testing.T) {
 	for _, ttl := range []uint8{0, 1} {
 		for _, messageType := range []uint8{3, 11} {
@@ -215,10 +216,10 @@ func ipv4FragmentPacket(t *testing.T, flags layers.IPv4Flag, offset uint16, payl
 	return gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 }
 
-// RFC 7915 Sections 4.3 and 5.3 (MUST): the packet quoted in an ICMP error is translated like any packet, so IPv4
-// options disappear, a fragment keeps its fragmentation state (as a Fragment header in the other family), IPv6
-// extension headers are skipped, and a quote cut off after the first eight transport octets (RFC 792) still gets
-// its header translated, with the Payload Length / Total Length describing the original packet.
+// RFC 7915 Sections 4.3 and 5.3 (MUST): "The ICMP error messages containing the packet in error MUST be translated
+// just like a normal IP packet"
+//
+// A quote cut off after the first eight transport octets (RFC 792) keeps the length of the original packet.
 func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 	t.Run("IPv4 quote with options", func(t *testing.T) {
 		quote := ipv4TCPPacketWithOptions(t, ipv4NOP, ipv4NOP, ipv4NOP, ipv4NOP).Data()
@@ -294,21 +295,23 @@ func TestTranslateICMPErrorQuoteVariants(t *testing.T) {
 	})
 }
 
-// RFC 7915 Sections 4.3 and 5.3 (MUST): an ICMP error that quotes an ICMP error, or whose quoted packet is not a
-// valid IP packet, cannot be translated and is dropped. A quote that carries an illegal address is not
-// translated either, because the translator would otherwise embed that address in the message it sends.
+// RFC 7915 Sections 4.3 and 5.3 (MUST): "This process MUST stop at the first embedded header and drop the packet if
+// it contains more embedded headers."
+//
+// A quote that is not a valid IP packet is dropped as well, and so is one with an illegal address, which would
+// otherwise be embedded in the translated message.
 func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	nsp := translatorWithPrefix(t, "2001:db8:64::/96", nil)
-	translateV4 := func(translator *siit.Translator, quote []byte) (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv4(ipv4ICMPPacket(t, 3, 3, quote), siit.TranslationOverrides{})
+	translateV4 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
+		return translateIPv4(t, translator, ipv4ICMPPacket(t, 3, 3, quote))
 	}
-	translateV6 := func(translator *siit.Translator, quote []byte) (siit.TranslatedPacket, error) {
-		return translator.TranslateIPv6(ipv6ICMPPacket(t, 1, 4, quote), siit.TranslationOverrides{})
+	translateV6 := func(t *testing.T, translator *siit.Translator, quote []byte) (translation, error) {
+		return translateIPv6(t, translator, ipv6ICMPPacket(t, 1, 4, quote))
 	}
 	tests := []struct {
 		name       string
 		translator *siit.Translator
-		translate  func(*siit.Translator, []byte) (siit.TranslatedPacket, error)
+		translate  func(*testing.T, *siit.Translator, []byte) (translation, error)
 		quote      []byte
 	}{
 		{"IPv4 error quoting an ICMP error", testTranslator(), translateV4, ipv4ICMPPacket(t, 3, 3, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()).Data()},
@@ -318,6 +321,8 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 		{"IPv4 quote truncated inside the header", testTranslator(), translateV4, []byte{0x45, 0, 0, 20}},
 		{"IPv6 quote truncated inside the header", testTranslator(), translateV6, []byte{0x60, 0, 0, 0}},
 		{"IPv4 quote with a wrong version", testTranslator(), translateV4, append([]byte{0x65}, ipv4Segment(t, segmentTCP, ipv4Source, ipv4Dest, defaultTTL).Data()[1:]...)},
+		{"IPv4 quote of ICMP without an ICMP header", testTranslator(), translateV4, serializeTestPacket(t, &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest})},
+		{"IPv6 quote of ICMP without an ICMP header", testTranslator(), translateV6, serializeTestPacket(t, &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolICMPv6, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest})},
 		{"IPv4 quote with an illegal source (WKP)", testTranslator(), translateV4, ipv4Segment(t, segmentTCP, net.ParseIP("10.1.2.3").To4(), ipv4Dest, defaultTTL).Data()},
 		{"IPv4 quote with an illegal destination (WKP)", testTranslator(), translateV4, ipv4Segment(t, segmentTCP, ipv4Source, net.ParseIP("127.0.0.1").To4(), defaultTTL).Data()},
 		{"IPv4 quote with an illegal source (NSP)", nsp, translateV4, ipv4Segment(t, segmentTCP, net.ParseIP("224.0.0.1").To4(), ipv4Dest, defaultTTL).Data()},
@@ -328,17 +333,20 @@ func TestTranslateDropsInvalidQuotes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := test.translate(test.translator, test.quote)
-			if result.Packet != nil {
+			result, err := test.translate(t, test.translator, test.quote)
+			if result.packet != nil {
 				t.Fatalf("ICMP error with an invalid quote was translated: err=%v", err)
 			}
 		})
 	}
 }
 
-// RFC 4443 Section 2.4 (c) (MUST: an ICMPv6 error carries as much of the invoking packet as fits without exceeding
-// the minimum IPv6 MTU of 1280 octets) and RFC 1812 Section 4.3.2.3 (SHOULD: an ICMPv4 error stays within 576
-// octets): the quote of a translated or generated ICMP error is truncated when it does not fit.
+// RFC 4443 Section 2.4 (MUST): "Every ICMPv6 error message (type < 128) MUST include as much of the IPv6 offending
+// (invoking) packet (the packet that caused the error) as possible without making the error message packet exceed
+// the minimum IPv6 MTU"
+//
+// RFC 1812 Section 4.3.2.3 (SHOULD): "the ICMP datagram SHOULD contain as much of the original datagram as possible
+// without the length of the ICMP datagram exceeding 576 bytes."
 func TestTranslateICMPErrorIsTruncatedToMinimumSizes(t *testing.T) {
 	t.Run("ICMPv4 to ICMPv6", func(t *testing.T) {
 		quote := ipv4TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1400-ipv4HeaderLength-20), nil).Data()
@@ -359,24 +367,27 @@ func TestTranslateICMPErrorIsTruncatedToMinimumSizes(t *testing.T) {
 	})
 	t.Run("generated Time Exceeded for IPv4", func(t *testing.T) {
 		packet := withTTL(t, ipv4TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200), nil), 1)
-		result, err := testTranslator().TranslateIPv4(packet, siit.TranslationOverrides{})
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.Packet) != maxIPv6PacketLength {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.Packet), err, maxIPv6PacketLength)
+		result, err := translateIPv4(t, testTranslator(), packet)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != 576 {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.reply), err)
 		}
 	})
 	t.Run("generated Time Exceeded for IPv6", func(t *testing.T) {
 		packet := withHopLimit(t, ipv6TCPPayloadPacket(t, bytes.Repeat([]byte{0x5a}, 1200)), 1)
-		result, err := testTranslator().TranslateIPv6(packet, siit.TranslationOverrides{})
-		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.Packet) != 576 {
-			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want 576", len(result.Packet), err)
+		result, err := translateIPv6(t, testTranslator(), packet)
+		if !errors.Is(err, siit.ErrTimeExceeded) || len(result.reply) != maxIPv6PacketLength {
+			t.Fatalf("generated Time Exceeded is %d octets (err=%v), want %d", len(result.reply), err, maxIPv6PacketLength)
 		}
 	})
 }
 
-// RFC 7915 Section 4.2 (MUST): Fragmentation Needed becomes Packet Too Big with the MTU
-// maximum(1280, minimum(MTU + 20, MTU of the IPv6 next hop)). A next-hop MTU of zero (a router predating RFC 1191)
-// is replaced by the greatest RFC 1191 Table 7-1 plateau below the Total Length of the original datagram. The RFC
-// does not say whether the 20 octets are added to a plateau; the library does, and the plateau rows pin that.
+// RFC 7915 Section 4.2 (MUST): "The MTU field MUST be adjusted for the difference between the IPv4 and IPv6 header
+// sizes, but MUST NOT be set to a value smaller than the minimum IPv6 MTU (1280 bytes)."
+//
+// RFC 7915 Section 4.2 (MUST): "if the IPv4 router set the MTU field to zero, i.e., the router does not implement
+// [RFC1191], then the translator MUST use the plateau values specified in [RFC1191] to determine a likely path MTU"
+//
+// The RFC does not say whether the header size difference (20 octets) is added to a plateau; the library does, and the plateau rows pin that.
 func TestTranslateFragmentationNeededMTU(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -417,8 +428,10 @@ func TestTranslateFragmentationNeededMTU(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.2 (MUST): the MTU of a Packet Too Big loses the header size difference of 20, and is
-// limited by the translator's own IPv6 MTU (the next hop on the IPv4 side cannot take more than that either).
+// RFC 7915 Section 5.2 (MUST): "The MTU field MUST be adjusted for the difference between the IPv4 and IPv6 header
+// sizes"
+//
+// The MTU is also limited by the translator's own IPv6 MTU, because the IPv4 side cannot take more than that either.
 func TestTranslatePacketTooBigMTU(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -444,8 +457,10 @@ func TestTranslatePacketTooBigMTU(t *testing.T) {
 	}
 }
 
-// RFC 7915 Sections 4.2 and 4.3 (MUST) with RFC 7757 Section 3: every address of an ICMP error, in the outer header
-// and in the quote, goes through the EAM table, and a quoted TCP checksum follows the translated addresses.
+// RFC 7757 Section 3.2 (MUST): "an SIIT implementation MUST individually translate each IP address it encounters in
+// the packet's IP headers (including any IP headers contained within ICMP errors)"
+//
+// A quoted TCP checksum follows the translated addresses.
 func TestTranslateICMPErrorsUseEAMForOuterAndQuotedAddresses(t *testing.T) {
 	translator := testTranslatorWithEAM(eamTable)
 	t.Run("IPv4 to IPv6", func(t *testing.T) {
@@ -467,10 +482,10 @@ func TestTranslateICMPErrorsUseEAMForOuterAndQuotedAddresses(t *testing.T) {
 	})
 }
 
-// RFC 7915 Sections 5.2 and 5.3 with RFC 6791 Section 3 (SHOULD, and the only way for the IPv4 side to learn about
-// errors from native IPv6 routers): an ICMPv6 error whose source has no IPv4 mapping is translated with the
-// configured IPv4 router address as its source, for every error type and whatever the translator's prefix. The
-// destination must still map, because the error is addressed to a translated host; a query is never rewritten.
+// RFC 7915 Section 6 (SHOULD): "The stateless translator SHOULD support [RFC6791] for handling ICMP/ICMPv6 packets."
+//
+// An ICMPv6 error whose source has no IPv4 mapping gets the IPv4 router address as its source (RFC 6791). The
+// destination must still map, and a query is never rewritten.
 func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 	router := net.ParseIP("2a00:1098:82:72::1")
 	translators := map[string]*siit.Translator{
@@ -513,30 +528,16 @@ func TestTranslateICMPv6ErrorFromUnmappableRouter(t *testing.T) {
 	t.Run("a destination without mapping is not translated", func(t *testing.T) {
 		quote := ipv6Segment(t, segmentTCP, ipv6Unmappable, ipv6Dest, defaultTTL).Data()
 		input := ipv6ICMPErrorPacket(t, router, net.ParseIP("2a10:3781:56d5:8::e7"), icmpv6DestUnreachable, 0, zeroRestHeader(), quote)
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-		if result.Packet != nil {
+		result, err := translateIPv6(t, testTranslator(), input)
+		if result.packet != nil {
 			t.Fatalf("ICMPv6 error to an unmappable destination was translated: err=%v", err)
 		}
 	})
 	t.Run("an echo request from an unmappable source is not translated", func(t *testing.T) {
 		input := ipv6Segment(t, segmentICMP, router, ipv6Dest, defaultTTL)
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
-		if result.Packet != nil {
+		result, err := translateIPv6(t, testTranslator(), input)
+		if result.packet != nil {
 			t.Fatalf("ICMPv6 query from an unmappable source was translated: err=%v", err)
 		}
 	})
-}
-
-// RFC 7915 Sections 4.1 and 5.1 (SHOULD): the Time Exceeded message that the library generates for an expired
-// IPv4 packet is addressed to the translated IPv4 sender, so feeding it back through TranslateIPv6 must produce a
-// deliverable ICMPv4 Time Exceeded for that sender.
-func TestGeneratedTimeExceededCanBeTranslatedBack(t *testing.T) {
-	generated, err := testTranslator().TranslateIPv4(ipv4TCPPacket(t, 1), siit.TranslationOverrides{})
-	if !errors.Is(err, siit.ErrTimeExceeded) || generated.Packet == nil {
-		t.Fatalf("expired packet did not generate Time Exceeded: err=%v", err)
-	}
-	result := translateToICMPv4(t, testTranslator(), gopacket.NewPacket(generated.Packet, layers.LayerTypeIPv6, gopacket.Default))
-	if !result.ip.DstIP.Equal(ipv4Source) || !result.ip.SrcIP.Equal(ipv4RouterAddress) || result.icmp.TypeCode != layers.CreateICMPv4TypeCode(icmpv4TimeExceeded, 0) {
-		t.Fatalf("generated Time Exceeded was not translated into a deliverable ICMPv4 error: %v", result.packet.ErrorLayer())
-	}
 }

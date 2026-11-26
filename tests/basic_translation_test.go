@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -12,11 +11,11 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.1 and 5.1 (MUST): the IP header fields are translated. Version, header length, Total Length /
-// Payload Length and protocol follow from the new header; the TTL / Hop Limit is decremented by one; the
-// Traffic Class and TOS (including the ECN bits) are copied (RFC 7915 "SHOULD ignore", see the README); the Flow
-// Label is zero towards IPv6; and an IPv6 packet of at most 1260 octets (IPv4 length) clears DF, a larger one sets it (RFC 7915 Section 5.1). The DF bit of an unfragmented IPv4 packet
-// does not produce a Fragment header.
+// RFC 7915 Section 5 (MUST): "When the resulting IPv4 packet is smaller than or equal to 1260 bytes, the translator
+// MUST send the packet with a cleared Don't Fragment bit. Otherwise, the packet MUST be sent with the Don't Fragment
+// bit set."
+//
+// The other header fields follow RFC 7915 Sections 4.1 and 5.1. TOS / Traffic Class is always copied (see the README).
 func TestTranslateIPHeaderFields(t *testing.T) {
 	for _, tos := range []uint8{0, 0x2e << 2, 0x03, 0xff} {
 		for _, ttl := range []uint8{2, defaultTTL, 255} {
@@ -35,8 +34,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 			t.Run(fmt.Sprintf("IPv6 to IPv4 traffic class %#x hop limit %d", tos, ttl), func(t *testing.T) {
 				data := append([]byte(nil), ipv6Segment(t, segmentTCP, ipv6Source, ipv6Dest, ttl).Data()...)
 				data[0], data[1] = 0x60|tos>>4, data[1]&0x0f|tos<<4
-				result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-					return testTranslator().TranslateIPv6(gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default), siit.TranslationOverrides{})
+				result := mustTranslate(t, func() (translation, error) {
+					return translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
 				})
 				ip := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 				if ip.TOS != tos || ip.TTL != ttl-1 || ip.Protocol != layers.IPProtocolTCP || ip.IHL != 5 || ip.Flags != 0 || ip.FragOffset != 0 {
@@ -61,8 +60,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 		t.Run("IPv6 to IPv4 DF "+test.name, func(t *testing.T) {
 			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolGRE, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(bytes.Repeat([]byte{0xab}, test.payloadLen))), layers.LayerTypeIPv6, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv6(t, testTranslator(), input)
 			})
 			translated := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default).Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if gotDF := translated.Flags&layers.IPv4DontFragment != 0; gotDF != test.wantDF || translated.Length != uint16(ipv4HeaderLength+test.payloadLen) {
@@ -76,8 +75,8 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 		t.Run(fmt.Sprintf("IPv4 to IPv6 flags %v", flags), func(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Id: 0x1234, Flags: flags, Protocol: layers.IPProtocolGRE, SrcIP: ipv4Source, DstIP: ipv4Dest}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 16))), layers.LayerTypeIPv4, gopacket.Default)
-			result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-				return testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			result := mustTranslate(t, func() (translation, error) {
+				return translateIPv4(t, testTranslator(), input)
 			})
 			if translated := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default).Layer(layers.LayerTypeIPv6).(*layers.IPv6); translated.NextHeader != layers.IPProtocolGRE || len(result) != ipv6HeaderLength+16 {
 				t.Fatalf("unfragmented packet was translated with a Fragment header: %+v", translated)
@@ -88,14 +87,17 @@ func TestTranslateIPHeaderFields(t *testing.T) {
 
 func translateIPv4Raw(t *testing.T, data []byte) gopacket.Packet {
 	t.Helper()
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default), siit.TranslationOverrides{})
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
 	})
 	return gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 }
 
-// RFC 7915 Sections 4.5 and 5.5 (MUST): TCP and UDP payloads of empty, odd, even and large lengths, and TCP options,
-// survive a translation in each direction and keep a valid checksum for the new pseudo-header.
+// RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain
+// pseudo-headers need to be performed. Translators MUST do this for TCP and ICMP packets and for UDP packets that
+// contain a UDP checksum"
+//
+// RFC 7915 Section 5.5 (MUST): "Translators MUST do this for TCP, UDP, and ICMP."
 func TestTranslateTransportPayloads(t *testing.T) {
 	mss := []layers.TCPOption{{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}}
 	wscale := []layers.TCPOption{{OptionType: layers.TCPOptionKindNop, OptionLength: 1}, {OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{7}}}
@@ -141,8 +143,8 @@ func TestTranslateTransportPayloads(t *testing.T) {
 
 func translateToIPv4Packet(t *testing.T, input gopacket.Packet) gopacket.Packet {
 	t.Helper()
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv6(t, testTranslator(), input)
 	})
 	return gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
 }
@@ -185,33 +187,35 @@ func TestTranslateEnforcesMTU(t *testing.T) {
 					payload := bytes.Repeat([]byte{0xab}, test.size-ipv4HeaderLength-udpHeaderLength)
 					input = gopacket.NewPacket(serializeTestPacket(t, ip, udp, gopacket.Payload(payload)), layers.LayerTypeIPv4, gopacket.Default)
 				}
-				result, err := translatorWithMTU(t, mtu).TranslateIPv4(input, siit.TranslationOverrides{})
+				result, err := translateIPv4(t, translatorWithMTU(t, mtu), input)
 				if test.wantError {
-					if !errors.Is(err, siit.ErrPacketOversized) || result.Packet != nil {
-						t.Fatalf("oversized IPv4 packet was not rejected with ErrPacketOversized: result length=%d err=%v", len(result.Packet), err)
+					if !errors.Is(err, siit.ErrPacketOversized) || result.packet != nil {
+						t.Fatalf("oversized IPv4 packet was not rejected with ErrPacketOversized: result length=%d err=%v", len(result.packet), err)
 					}
 					return
 				}
-				if err != nil || len(result.Packet) != int(mtu) {
-					t.Fatalf("maximum IPv4 packet was not translated to a full-size IPv6 packet: result length=%d err=%v", len(result.Packet), err)
+				if err != nil || len(result.packet) != int(mtu) {
+					t.Fatalf("maximum IPv4 packet was not translated to a full-size IPv6 packet: result length=%d err=%v", len(result.packet), err)
 				}
 			})
 		}
 	}
 }
 
-// Local configuration contract (README): an MTU below the IPv6 minimum of 1280 is rejected at creation.
-func TestNewTranslatorWithMTURejectsValuesBelowIPv6Minimum(t *testing.T) {
-	_, nat64Net, err := net.ParseCIDR("64:ff9b::/96")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, mtu := range []uint32{0, 68, 1279} {
-		if _, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, mtu); !errors.Is(err, siit.ErrInvalidMTU) {
+// Local configuration contract (README): an MTU below the IPv6 minimum of 1280 is rejected at creation, and zero
+// means 1280.
+func TestNewTranslatorRejectsMTUBelowIPv6Minimum(t *testing.T) {
+	config := testConfig("64:ff9b::/96", nil)
+	for _, mtu := range []uint32{1, 68, 1279} {
+		config.MTU = mtu
+		if _, err := siit.NewTranslator(config); !errors.Is(err, siit.ErrInvalidMTU) {
 			t.Fatalf("MTU %d: got error %v, want ErrInvalidMTU", mtu, err)
 		}
 	}
-	if _, err := siit.NewTranslatorWithMTU(nat64Net, ipv4RouterAddress, nil, 1280); err != nil {
-		t.Fatalf("the IPv6 minimum MTU was rejected: %v", err)
+	for _, mtu := range []uint32{0, 1280} {
+		config.MTU = mtu
+		if _, err := siit.NewTranslator(config); err != nil {
+			t.Fatalf("MTU %d was rejected: %v", mtu, err)
+		}
 	}
 }

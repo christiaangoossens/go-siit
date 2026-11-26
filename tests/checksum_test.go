@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -16,14 +18,19 @@ var (
 	// Two hosts with an Explicit Address Mapping, so that the translated pseudo-header differs from the Well-Known Prefix one.
 	eamHost1 = net.ParseIP("2001:db8::10")
 	eamHost2 = net.ParseIP("2001:db8::20")
-	eamTable = siit.RawEAMTable{
+	eamTable = rawEAMTable{
 		{IPv4Prefix: "1.1.1.1/32", IPv6Prefix: "2001:db8::10/128"},
 		{IPv4Prefix: "2.2.2.2/32", IPv6Prefix: "2001:db8::20/128"},
 	}
 )
 
-// RFC 7915 Sections 4.5 and 5.5 (MUST): the transport checksum is updated for the changed pseudo-header (and for
-// ICMP the dropped or added pseudo-header, Sections 4.2 and 5.2), whichever addresses the mapping produces.
+// RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain
+// pseudo-headers need to be performed. Translators MUST do this for TCP and ICMP packets and for UDP packets that
+// contain a UDP checksum"
+//
+// RFC 7915 Section 5.5 (MUST): "Translators MUST do this for TCP, UDP, and ICMP."
+//
+// For ICMP the pseudo-header is added or dropped (RFC 7915 Sections 4.2 and 5.2).
 func TestTranslatedChecksumsCoverTheNewPseudoHeader(t *testing.T) {
 	mappings := []struct {
 		name       string
@@ -38,8 +45,8 @@ func TestTranslatedChecksumsCoverTheNewPseudoHeader(t *testing.T) {
 		for _, kind := range []string{segmentTCP, segmentUDP, segmentICMP} {
 			t.Run(mapping.name+"/"+kind+"/IPv4 to IPv6", func(t *testing.T) {
 				input := ipv4Segment(t, kind, ipv4Source, ipv4Dest, defaultTTL)
-				result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-					return mapping.translator.TranslateIPv4(input, siit.TranslationOverrides{})
+				result := mustTranslate(t, func() (translation, error) {
+					return translateIPv4(t, mapping.translator, input)
 				})
 				packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 				ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -50,8 +57,8 @@ func TestTranslatedChecksumsCoverTheNewPseudoHeader(t *testing.T) {
 			})
 			t.Run(mapping.name+"/"+kind+"/IPv6 to IPv4", func(t *testing.T) {
 				input := ipv6Segment(t, kind, mapping.v6Source, mapping.v6Dest, defaultTTL)
-				result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-					return mapping.translator.TranslateIPv6(input, siit.TranslationOverrides{})
+				result := mustTranslate(t, func() (translation, error) {
+					return translateIPv6(t, mapping.translator, input)
 				})
 				packet := gopacket.NewPacket(result, layers.LayerTypeIPv4, gopacket.Default)
 				ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
@@ -134,24 +141,18 @@ func TestTranslateRejectsInvalidChecksums(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			// Flip a bit instead of zeroing so that an IPv4 UDP checksum is invalid rather than absent.
-			var result siit.TranslatedPacket
+			var result translation
 			var err error
 			if test.v4 {
 				data := append([]byte(nil), ipv4Segment(t, test.kind, ipv4Source, ipv4Dest, defaultTTL).Data()...)
 				data[test.offset] ^= 0x10
-				result, err = testTranslator().TranslateIPv4(gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default), siit.TranslationOverrides{})
-				if !result.SrcIP.Equal(ipv4TranslatedSource) || !result.DstIP.Equal(ipv4TranslatedDest) {
-					t.Fatalf("metadata was not preserved: %s -> %s", result.SrcIP, result.DstIP)
-				}
+				result, err = translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
 			} else {
 				data := append([]byte(nil), ipv6Segment(t, test.kind, ipv6Source, ipv6Dest, defaultTTL).Data()...)
 				data[test.offset] ^= 0x10
-				result, err = testTranslator().TranslateIPv6(gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default), siit.TranslationOverrides{})
-				if !result.SrcIP.Equal(ipv6TranslatedSource) || !result.DstIP.Equal(ipv6TranslatedDest) {
-					t.Fatalf("metadata was not preserved: %s -> %s", result.SrcIP, result.DstIP)
-				}
+				result, err = translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
 			}
-			if !errors.Is(err, siit.ErrInvalidPacket) || result.Packet != nil {
+			if !errors.Is(err, siit.ErrInvalidPacket) || result.packet != nil {
 				t.Fatalf("packet with an invalid %s checksum was not rejected: err=%v", test.name, err)
 			}
 		})
@@ -165,21 +166,37 @@ func zeroUDPChecksum(t *testing.T, packet gopacket.Packet, headerLength int) []b
 	return data
 }
 
-// RFC 7915 Section 5.5 (MUST) with RFC 8200 Section 8.1: an IPv6 UDP packet with a zero checksum is invalid
-// and silently dropped.
-func TestTranslateIPv6ZeroChecksumUDPDropsPacket(t *testing.T) {
+// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the error."
+func TestTranslateIPv6ZeroChecksumUDPRejectsPacket(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv6Segment(t, segmentUDP, ipv6Source, ipv6Dest, defaultTTL), ipv6HeaderLength)
-	result, err := testTranslator().TranslateIPv6(gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default), siit.TranslationOverrides{})
-	requireDropped(t, result, err)
+	result, err := translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
+	requireZeroUDPChecksumError(t, result, err, endpoint(ipv6Source, testSourcePort), endpoint(ipv6Dest, testUDPDestinationPort))
 }
 
-// RFC 7915 Section 4.5 (MUST) with RFC 768: an unfragmented IPv4 UDP datagram without a checksum is
-// translated with a newly computed IPv6 checksum (the first of the two permitted behaviours; the other, dropping
-// the packet, is not implemented, see the README).
+func endpoint(ip net.IP, port int) string { return net.JoinHostPort(ip.String(), strconv.Itoa(port)) }
+
+// requireZeroUDPChecksumError requires a rejection whose error names the addresses and ports, so the caller can log it.
+func requireZeroUDPChecksumError(t *testing.T, result translation, err error, endpoints ...string) {
+	t.Helper()
+	if !errors.Is(err, siit.ErrZeroUDPChecksum) || result.packet != nil {
+		t.Fatalf("got err=%v, packet length %d, want ErrZeroUDPChecksum", err, len(result.packet))
+	}
+
+	for _, endpoint := range endpoints {
+		if !strings.Contains(err.Error(), endpoint) {
+			t.Fatalf("error %q does not name %s", err, endpoint)
+		}
+	}
+}
+
+// RFC 7915 Section 4.5 (SHOULD): "the translator SHOULD provide a configuration function to allow: ... 2.
+// Calculating an IPv6 checksum and forwarding the packet"
+//
+// The first behaviour, dropping the packet, is not implemented (see the README).
 func TestTranslateIPv4ZeroChecksumUDPGetsComputedChecksum(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv4Segment(t, segmentUDP, ipv4Source, ipv4Dest, defaultTTL), ipv4HeaderLength)
-	result := mustTranslate(t, func() (siit.TranslatedPacket, error) {
-		return testTranslator().TranslateIPv4(gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default), siit.TranslationOverrides{})
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
 	})
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 	requireValidIPv6Checksum(t, packet, packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6))

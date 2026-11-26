@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"testing"
 
-	siit "github.com/christiaangoossens/go-siit"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.2 and 5.2 (MUST): Echo Request and Reply are translated in both directions, keeping
-// Identifier, Sequence Number and data, with the ICMPv6 pseudo-header added or dropped in the checksum
-// (Sections 4.5 and 5.5; the checksum values themselves are covered in checksum_test.go).
+// RFC 7915 Sections 4.2 and 5.2 (MUST): "packets MUST have the Type translated"
+//
+// Echo Request and Reply keep their Identifier, Sequence Number and data.
 func TestTranslateICMPEcho(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -52,7 +51,7 @@ func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Source, DstIP: ipv4Dest}
 			icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(messageType, 1), Id: 1, Seq: 1}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp), layers.LayerTypeIPv4, gopacket.Default)
-			result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+			result, err := translateIPv4(t, testTranslator(), input)
 			requireRejected(t, result, err)
 		})
 	}
@@ -64,13 +63,13 @@ func TestTranslateICMPEchoRejectsNonzeroCode(t *testing.T) {
 				t.Fatal(err)
 			}
 			input := gopacket.NewPacket(serializeTestPacket(t, ip, icmp, gopacket.Payload([]byte{0, 1, 0, 1})), layers.LayerTypeIPv6, gopacket.Default)
-			result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+			result, err := translateIPv6(t, testTranslator(), input)
 			requireRejected(t, result, err)
 		})
 	}
 }
 
-// RFC 7915 Figures 3 and 6 (MUST) with RFC 792 / RFC 4443: the Parameter Problem pointer is mapped octet by octet
+// RFC 7915 Figures 3 and 6 with RFC 792 / RFC 4443: the Parameter Problem pointer is mapped octet by octet
 // to the pointer of the other family, and pointers to a field that has no counterpart ("n/a") cause a silent drop.
 // ICMPv4 carries the pointer in octet 4 of the message (codes 0 and 2 alike), ICMPv6 a 32-bit pointer. Every ICMPv4
 // pointer 0-20 and every ICMPv6 pointer 0-41 is covered.
@@ -86,7 +85,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 			t.Run(fmt.Sprintf("IPv4 code %d pointer %d", code, pointer), func(t *testing.T) {
 				input := ipv4ICMPPacketWithRest(t, layers.ICMPv4TypeParameterProblem, code, uint16(pointer)<<8, 0, ipv4TCPPacket(t, defaultTTL).Data())
 				if want == drop {
-					result, err := testTranslator().TranslateIPv4(input, siit.TranslationOverrides{})
+					result, err := translateIPv4(t, testTranslator(), input)
 					requireDropped(t, result, err)
 					return
 				}
@@ -123,7 +122,7 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 		t.Run(fmt.Sprintf("IPv6 pointer %d", pointer), func(t *testing.T) {
 			input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(uint32(pointer)), ipv6TCPPacket(t, defaultTTL).Data())
 			if want == drop {
-				result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+				result, err := translateIPv6(t, testTranslator(), input)
 				requireDropped(t, result, err)
 				return
 			}
@@ -138,13 +137,16 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 	}
 	t.Run("IPv6 pointer past the packet", func(t *testing.T) {
 		input := ipv6ICMPPacketWithRestHeader(t, layers.ICMPv6TypeParameterProblem, 0, icmpPointer(1000), ipv6TCPPacket(t, defaultTTL).Data())
-		result, err := testTranslator().TranslateIPv6(input, siit.TranslationOverrides{})
+		result, err := translateIPv6(t, testTranslator(), input)
 		requireDropped(t, result, err)
 	})
 }
 
-// RFC 7915 Sections 4.2 and 5.2 (MUST): Destination Unreachable code 2 becomes Parameter Problem code 1 pointing
-// at the IPv6 Next Header (6), and Parameter Problem code 1 becomes Destination Unreachable code 2 (Protocol).
+// RFC 7915 Section 4.2: "Code 2 (Protocol Unreachable): Translate to an ICMPv6 Parameter Problem (Type 4, Code 1) and
+// make the Pointer point to the IPv6 Next Header field."
+//
+// RFC 7915 Section 5.2: "Code 1 (Unrecognized Next Header type encountered): Translate this to an ICMPv4 protocol
+// unreachable (Type 3, Code 2)."
 func TestTranslateProtocolUnreachableAndUnrecognizedNextHeader(t *testing.T) {
 	v6 := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 2, ipv4TCPPacket(t, defaultTTL).Data()))
 	if v6.icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 1) || icmpPointerValue(t, v6.icmp.Payload) != 6 {

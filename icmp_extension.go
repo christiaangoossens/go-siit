@@ -1,8 +1,6 @@
 package siit
 
-/**
- * RFC 4884 (Extended ICMP to Support Multi-Part Messages)
- */
+// RFC 4884 (Extended ICMP to Support Multi-Part Messages)
 
 const icmpExtensionMinimumDatagram = 128
 

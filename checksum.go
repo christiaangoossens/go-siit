@@ -2,21 +2,28 @@ package siit
 
 import (
 	"encoding/binary"
-	"net"
+	"fmt"
+	"net/netip"
 
 	"github.com/google/gopacket/layers"
 )
 
-/**
- * Internet checksum (RFC 1071, RFC 1624)
- */
+// Internet checksum (RFC 1071, RFC 1624)
+
+type transportChecksum struct{ headerLength, checksumOffset int }
 
 // Minimum length and checksum offset of every transport protocol with a checksum.
-var checksummedProtocols = map[layers.IPProtocol]struct{ headerLength, checksumOffset int }{
-	layers.IPProtocolTCP:    {20, 16},
-	layers.IPProtocolUDP:    {8, 6},
-	layers.IPProtocolICMPv4: {8, 2},
-	layers.IPProtocolICMPv6: {8, 2},
+func checksummedProtocol(protocol layers.IPProtocol) (transportChecksum, bool) {
+	switch protocol {
+	case layers.IPProtocolTCP:
+		return transportChecksum{20, 16}, true
+	case layers.IPProtocolUDP:
+		return transportChecksum{8, 6}, true
+	case layers.IPProtocolICMPv4, layers.IPProtocolICMPv6:
+		return transportChecksum{8, 2}, true
+	}
+
+	return transportChecksum{}, false
 }
 
 // Only the last part may have an odd length.
@@ -53,28 +60,43 @@ func adjustChecksum(checksum uint16, removed, added []byte) uint16 {
 	return ^uint16(sum)
 }
 
+// Kept small enough to inline, so the header is allocated on the caller's stack.
+
 // The ICMPv4 checksum has no pseudo-header (RFC 792).
-func ipv4PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+func ipv4PseudoHeader(source, destination netip.Addr, protocol layers.IPProtocol, length int) []byte {
 	if protocol == layers.IPProtocolICMPv4 {
 		return nil
 	}
 
 	header := make([]byte, 12)
-	copy(header[0:4], source.To4())
-	copy(header[4:8], destination.To4())
-	header[9] = byte(protocol)
-	binary.BigEndian.PutUint16(header[10:12], uint16(length))
+	fillIPv4PseudoHeader(header, source, destination, protocol, length)
 	return header
 }
 
+func fillIPv4PseudoHeader(header []byte, source, destination netip.Addr, protocol layers.IPProtocol, length int) {
+	sourceBytes, destinationBytes := source.As4(), destination.As4()
+	copy(header[0:4], sourceBytes[:])
+	copy(header[4:8], destinationBytes[:])
+	header[9] = byte(protocol)
+	binary.BigEndian.PutUint16(header[10:12], uint16(length))
+}
+
 // RFC 8200 Section 8.1
-func ipv6PseudoHeader(source, destination net.IP, protocol layers.IPProtocol, length int) []byte {
+func ipv6PseudoHeader(source, destination netip.Addr, protocol layers.IPProtocol, length int) []byte {
 	header := make([]byte, 40)
-	copy(header[0:16], source.To16())
-	copy(header[16:32], destination.To16())
+	fillIPv6PseudoHeader(header, source, destination, protocol, length)
+	return header
+}
+
+// Inlining this would make ipv6PseudoHeader too large to inline itself.
+//
+//go:noinline
+func fillIPv6PseudoHeader(header []byte, source, destination netip.Addr, protocol layers.IPProtocol, length int) {
+	sourceBytes, destinationBytes := source.As16(), destination.As16()
+	copy(header[0:16], sourceBytes[:])
+	copy(header[16:32], destinationBytes[:])
 	binary.BigEndian.PutUint32(header[32:36], uint32(length))
 	header[39] = byte(protocol)
-	return header
 }
 
 func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
@@ -83,7 +105,7 @@ func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
 
 // Protocols without a checksum are always valid. A UDP checksum of zero is handled by the caller.
 func validTransportChecksum(pseudoHeader []byte, protocol layers.IPProtocol, payload []byte) bool {
-	transport, ok := checksummedProtocols[protocol]
+	transport, ok := checksummedProtocol(protocol)
 	if !ok {
 		return true
 	}
@@ -92,6 +114,15 @@ func validTransportChecksum(pseudoHeader []byte, protocol layers.IPProtocol, pay
 }
 
 func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
-	offset := checksummedProtocols[layers.IPProtocolUDP].checksumOffset
+	udp, _ := checksummedProtocol(layers.IPProtocolUDP)
+	offset := udp.checksumOffset
 	return protocol == layers.IPProtocolUDP && len(payload) >= offset+2 && binary.BigEndian.Uint16(payload[offset:]) == 0
+}
+
+// zeroUDPChecksumError names the addresses and ports of a UDP payload that isZeroUDPChecksum accepted, so the caller
+// can log it.
+func zeroUDPChecksumError(source, destination netip.Addr, payload []byte) error {
+	sourceEndpoint := netip.AddrPortFrom(source, binary.BigEndian.Uint16(payload[0:2]))
+	destinationEndpoint := netip.AddrPortFrom(destination, binary.BigEndian.Uint16(payload[2:4]))
+	return fmt.Errorf("%w: %s -> %s", ErrZeroUDPChecksum, sourceEndpoint, destinationEndpoint)
 }
