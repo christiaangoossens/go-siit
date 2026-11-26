@@ -3,9 +3,11 @@ package siit_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"testing"
 
+	siit "github.com/christiaangoossens/go-siit"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -180,6 +182,23 @@ func ipv6FragmentHeader(fragment *layers.IPv6Fragment) []byte {
 func serializeIPv6FragmentPacket(t *testing.T, ip *layers.IPv6, fragment *layers.IPv6Fragment, payload []byte) []byte {
 	t.Helper()
 	return serializeTestPacket(t, ip, gopacket.Payload(append(ipv6FragmentHeader(fragment), payload...)))
+}
+
+// RFC 7915 Section 5.1.1 (SHOULD): a fragment followed by an extension header is dropped with an error, so the
+// caller can log it.
+func TestTranslateIPv6FragmentWithExtensionHeaderIsReported(t *testing.T) {
+	for _, next := range []layers.IPProtocol{layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Destination, layers.IPProtocolAH} {
+		t.Run(next.String(), func(t *testing.T) {
+			ip := &layers.IPv6{Version: 6, NextHeader: layers.IPProtocolIPv6Fragment, HopLimit: defaultTTL, SrcIP: ipv6Source, DstIP: ipv6Dest}
+			fragment := &layers.IPv6Fragment{NextHeader: next}
+			input := gopacket.NewPacket(serializeIPv6FragmentPacket(t, ip, fragment, make([]byte, 8)), layers.LayerTypeIPv6, gopacket.Default)
+
+			result, err := translateIPv6(t, testTranslator(), input)
+			if result.packet != nil || !errors.Is(err, siit.ErrUnsupportedProtocol) {
+				t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.packet))
+			}
+		})
+	}
 }
 
 // RFC 7915 Section 4.5 (SHOULD, see the README) and Section 1.2: a stateless translator cannot compute the UDP

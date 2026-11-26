@@ -3,7 +3,6 @@ package siit
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"sync/atomic"
 
@@ -209,10 +208,9 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 		payload, offset = payload[ipv6FragmentHeaderLength:], offset+ipv6FragmentHeaderLength
 
 		// RFC 7915 Section 5.1.1 says a Fragment Header followed by an
-		// extension header should be dropped because IPv4 cannot represent it.
+		// extension header should be dropped and logged because IPv4 cannot represent it.
 		if isIPv6FragmentExtension(protocol) {
-			log.Printf("Dropping IPv6 fragment with extension header %d, which cannot be represented in IPv4", protocol)
-			return translated, nil
+			return translated, fmt.Errorf("%w: IPv6 fragment followed by extension header %d", ErrUnsupportedProtocol, protocol)
 		}
 	}
 

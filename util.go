@@ -1,7 +1,6 @@
 package siit
 
 import (
-	"log"
 	"net"
 
 	"github.com/google/gopacket"
@@ -33,7 +32,7 @@ func serializeTranslatedPacket(options gopacket.SerializeOptions, srcIP, dstIP n
 
 	buffer := gopacket.NewSerializeBufferExpectedSize(headerLength, len(payload))
 	if err := gopacket.SerializeLayers(buffer, options, header, gopacket.Payload(payload)); err != nil {
-		log.Printf("Failed to serialize packet: %v", err)
+		// Callers treat a packet without bytes as a failure.
 		return TranslatedPacket{SrcIP: srcIP, DstIP: dstIP}
 	}
 
