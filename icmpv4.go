@@ -181,9 +181,11 @@ func isICMPv4ErrorType(icmpType byte) bool {
 
 // translateICMPv4Error builds the ICMPv6 error around the translated quote, RFC 4884 extensions go to Types 1 and 3.
 func (t *Translator) translateICMPv4Error(ip *layers.IPv6, payload []byte, icmpType, code byte, rest uint32) ([]byte, bool) {
-	data, extension := payload[icmpErrorHeaderLength:], []byte(nil)
-	if icmpType == 1 || icmpType == 3 {
-		data, extension = splitICMPExtension(data, int(payload[5]), 4)
+	// Every translated ICMPv4 error (Types 3, 11 and 12) has the RFC 4884 length attribute, but ICMPv6 only defines
+	// extensions for Types 1 and 3, so the extension is left out of the others.
+	data, extension := splitICMPExtension(payload[icmpErrorHeaderLength:], int(payload[5]), 4)
+	if icmpType != 1 && icmpType != 3 {
+		extension = nil
 	}
 
 	quote := t.translateQuotedIPv4(data)

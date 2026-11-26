@@ -201,3 +201,24 @@ func TestTranslateIPv4ZeroChecksumUDPGetsComputedChecksum(t *testing.T) {
 	packet := gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 	requireValidIPv6Checksum(t, packet, packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6))
 }
+
+// RFC 768: "If the computed checksum is zero, it is transmitted as all ones (the equivalent in one's complement
+// arithmetic)."
+//
+// The two payload octets are chosen so that the checksum computed for the IPv6 pseudo-header is zero.
+func TestTranslateIPv4ZeroChecksumUDPComputedAsZeroIsSentAsAllOnes(t *testing.T) {
+	const udpLength = udpHeaderLength + 2
+	pseudoHeader := cat(ipv4TranslatedSource, ipv4TranslatedDest, []byte{0, 0, 0, udpLength, 0, 0, 0, byte(layers.IPProtocolUDP)})
+	header := binary.BigEndian.AppendUint16(binary.BigEndian.AppendUint16(nil, testSourcePort), testUDPDestinationPort)
+	header = append(header, 0, udpLength, 0, 0)
+	payload := binary.BigEndian.AppendUint16(nil, checksum(cat(pseudoHeader, header)))
+
+	data := zeroUDPChecksum(t, ipv4UDPPacket(t, payload), ipv4HeaderLength)
+	result := mustTranslate(t, func() (translation, error) {
+		return translateIPv4(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.Default))
+	})
+
+	if got := binary.BigEndian.Uint16(result[udpChecksumOffset(ipv6HeaderLength):]); got != 0xffff {
+		t.Fatalf("UDP checksum %#x, want 0xffff", got)
+	}
+}

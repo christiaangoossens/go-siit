@@ -12,6 +12,10 @@ import (
 
 // TranslateIPv6 translates an IPv6 packet, starting at the IP header, to IPv4. It is like TranslateIPv4 otherwise.
 func (t *Translator) TranslateIPv6(packet []byte) (Packet, error) {
+	if isEmptyIPv6(packet) {
+		return t.translateIPv6(emptyIPv6Layer(packet), false)
+	}
+
 	var ip layers.IPv6
 	if err := ip.DecodeFromBytes(packet, gopacket.NilDecodeFeedback); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPacket, err)
@@ -76,9 +80,9 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	//  headers HOPOPT (0), IPv6-Route (43), and IPv6-Opts (60) are
 	//  skipped over during processing as they have no meaning in IPv4.
 	segmentsLeftOffset := 0
-	for protocol == layers.IPProtocolIPv6HopByHop || protocol == layers.IPProtocolIPv6Routing || protocol == layers.IPProtocolIPv6Destination {
-		// RFC 8200 Section 4.3: Next Header, then Hdr Ext Len in 8-octet units not including the first 8 octets.
-		if len(payload) < 8 || len(payload) < (int(payload[1])+1)*8 {
+	for isSkippedIPv6Extension(protocol) {
+		next, rest, ok := skipIPv6Extension(payload)
+		if !ok {
 			return nil, fmt.Errorf("%w: truncated IPv6 extension header", ErrInvalidPacket)
 		}
 
@@ -87,8 +91,13 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 			segmentsLeftOffset = offset + 3
 		}
 
-		extensionLength := (int(payload[1]) + 1) * 8
-		protocol, payload, offset = layers.IPProtocol(payload[0]), payload[extensionLength:], offset+extensionLength
+		protocol, payload, offset = next, rest, offset+len(payload)-len(rest)
+	}
+
+	// ICMPv4 has no IPv6 equivalent. Forwarding its protocol number would make the receiver parse the payload as
+	// something it is not. Like IPv4 protocol 58, it is rejected before any ICMP error is sent.
+	if carriesICMPv4(protocol, payload) {
+		return nil, fmt.Errorf("%w: IPv6 Next Header %d belongs to IPv4", ErrUnsupportedProtocol, layers.IPProtocolICMPv4)
 	}
 
 	// A quoted packet is not routed, so its Routing header does not matter.
@@ -231,6 +240,11 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 		if isIPv6FragmentExtension(protocol) {
 			return nil, fmt.Errorf("%w: IPv6 fragment followed by extension header %d", ErrUnsupportedProtocol, protocol)
 		}
+
+		// The first fragment holds the UDP header, so it is checked like an unfragmented datagram (RFC 8200 Section 8.1).
+		if !quoted && ipv4.FragOffset == 0 && isZeroUDPChecksum(payload, protocol) {
+			return nil, zeroUDPChecksumError(source, destination, payload)
+		}
 	}
 
 	// ICMPv6 (58) is changed to ICMPv4 (1).
@@ -294,6 +308,56 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (Packet, error)
 	}
 
 	return result, nil
+}
+
+// isEmptyIPv6 reports whether a packet is an IPv6 header with a Payload Length of 0 and no Hop-by-Hop header.
+// gopacket reads such a packet as a jumbogram (RFC 2675), which needs a Hop-by-Hop header, and rejects it, but without
+// a Hop-by-Hop header it is just a packet without payload.
+func isEmptyIPv6(packet []byte) bool {
+	return len(packet) >= ipv6HeaderLength && packet[0]>>4 == 6 && binary.BigEndian.Uint16(packet[4:6]) == 0 &&
+		layers.IPProtocol(packet[6]) != layers.IPProtocolIPv6HopByHop
+}
+
+// emptyIPv6Layer decodes the header of a packet for which isEmptyIPv6 holds. RFC 8200 Section 3 defines the layout.
+func emptyIPv6Layer(packet []byte) *layers.IPv6 {
+	header := packet[:ipv6HeaderLength]
+
+	return &layers.IPv6{
+		BaseLayer:    layers.BaseLayer{Contents: header, Payload: header[ipv6HeaderLength:]},
+		Version:      6,
+		TrafficClass: header[0]<<4 | header[1]>>4,
+		FlowLabel:    uint32(header[1]&0x0f)<<16 | uint32(binary.BigEndian.Uint16(header[2:4])),
+		NextHeader:   layers.IPProtocol(header[6]),
+		HopLimit:     header[7],
+		SrcIP:        header[8:24],
+		DstIP:        header[24:40],
+	}
+}
+
+// isSkippedIPv6Extension reports whether a header is one that RFC 7915 Section 5.1 skips: Hop-by-Hop (0), Routing (43)
+// or Destination Options (60).
+func isSkippedIPv6Extension(protocol layers.IPProtocol) bool {
+	return protocol == layers.IPProtocolIPv6HopByHop || protocol == layers.IPProtocolIPv6Routing || protocol == layers.IPProtocolIPv6Destination
+}
+
+// skipIPv6Extension returns the Next Header of an extension header and the data behind it, or false when the header is
+// truncated. RFC 8200 Section 4.3: Next Header, then Hdr Ext Len in 8-octet units not including the first 8 octets.
+func skipIPv6Extension(payload []byte) (layers.IPProtocol, []byte, bool) {
+	if len(payload) < 8 || len(payload) < (int(payload[1])+1)*8 {
+		return 0, nil, false
+	}
+
+	return layers.IPProtocol(payload[0]), payload[(int(payload[1])+1)*8:], true
+}
+
+// carriesICMPv4 reports whether the header behind the skipped extension headers, or behind a Fragment header, is
+// ICMPv4.
+func carriesICMPv4(protocol layers.IPProtocol, payload []byte) bool {
+	if protocol == layers.IPProtocolIPv6Fragment && len(payload) >= ipv6FragmentHeaderLength {
+		protocol = layers.IPProtocol(payload[0])
+	}
+
+	return protocol == layers.IPProtocolICMPv4
 }
 
 func isIPv6FragmentExtension(protocol layers.IPProtocol) bool {

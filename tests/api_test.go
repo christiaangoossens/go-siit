@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"sync"
@@ -205,6 +206,21 @@ func TestPacketReadsItsHeader(t *testing.T) {
 	var empty siit.Packet
 	if empty.Version() != 0 || empty.Src().IsValid() || empty.Dst().IsValid() || empty.Decode() != nil {
 		t.Fatal("empty packet does not report itself as empty")
+	}
+
+	for _, first := range []byte{0x00, 0x50, 0xf0} {
+		other := siit.Packet(append([]byte{first}, make([]byte, ipv6HeaderLength-1)...))
+		if other.Version() != 0 || other.Src().IsValid() || other.Dst().IsValid() || other.Decode() != nil {
+			t.Fatalf("packet starting with %#x reports version %d", first, other.Version())
+		}
+	}
+}
+
+func TestTranslationErrorReturnsTheWrappedMessage(t *testing.T) {
+	err := &siit.TranslationError{Err: fmt.Errorf("%w: detail", siit.ErrInvalidPacket)}
+
+	if got, want := err.Error(), siit.ErrInvalidPacket.Error()+": detail"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
 	}
 }
 

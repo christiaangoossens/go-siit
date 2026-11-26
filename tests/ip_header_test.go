@@ -31,10 +31,19 @@ func sourceRoute(optionType, pointer uint8) layers.IPv4Option {
 	return layers.IPv4Option{OptionType: optionType, OptionLength: 7, OptionData: []byte{pointer, 9, 9, 9, 9}}
 }
 
+// longLooseSourceRoute builds a loose source route option of length 15, with room for three addresses.
+func longLooseSourceRoute(pointer uint8) layers.IPv4Option {
+	return layers.IPv4Option{OptionType: 131, OptionLength: 15, OptionData: append([]byte{pointer}, bytes.Repeat([]byte{9}, 12)...)}
+}
+
 var (
-	ipv4NOP         = layers.IPv4Option{OptionType: 1, OptionLength: 1}
-	ipv4RecordRoute = layers.IPv4Option{OptionType: 7, OptionLength: 7, OptionData: []byte{4, 0, 0, 0, 0}}
-	ipv4Timestamp   = layers.IPv4Option{OptionType: 68, OptionLength: 8, OptionData: []byte{5, 0, 0, 0, 0, 0}}
+	ipv4EndOfOptions = layers.IPv4Option{OptionType: 0, OptionLength: 1}
+	ipv4NOP          = layers.IPv4Option{OptionType: 1, OptionLength: 1}
+	ipv4RecordRoute  = layers.IPv4Option{OptionType: 7, OptionLength: 7, OptionData: []byte{4, 0, 0, 0, 0}}
+	ipv4Timestamp    = layers.IPv4Option{OptionType: 68, OptionLength: 8, OptionData: []byte{5, 0, 0, 0, 0, 0}}
+	ipv4Timestamp20  = layers.IPv4Option{OptionType: 68, OptionLength: 20, OptionData: append([]byte{5, 0}, make([]byte, 16)...)}
+	ipv4Security     = layers.IPv4Option{OptionType: 130, OptionLength: 11, OptionData: make([]byte, 9)}
+	ipv4StreamID     = layers.IPv4Option{OptionType: 136, OptionLength: 4, OptionData: []byte{0x12, 0x34}}
 )
 
 // RFC 7915 Section 4.1 (MUST): "If any IPv4 options are present in the IPv4 packet, they MUST be ignored and the
@@ -57,6 +66,15 @@ func TestTranslateIPv4Options(t *testing.T) {
 		{name: "unexpired loose source route", options: []layers.IPv4Option{sourceRoute(131, 4), ipv4NOP}, sourceFailed: true},
 		{name: "unexpired strict source route", options: []layers.IPv4Option{sourceRoute(137, 4), ipv4NOP}, sourceFailed: true},
 		{name: "unexpired source route after other options", options: []layers.IPv4Option{ipv4NOP, sourceRoute(131, 4)}, sourceFailed: true},
+		{name: "security", options: []layers.IPv4Option{ipv4Security, ipv4NOP}},
+		{name: "stream identifier", options: []layers.IPv4Option{ipv4StreamID}},
+		{name: "end of option list", options: []layers.IPv4Option{ipv4RecordRoute, ipv4EndOfOptions}},
+		{name: "20-octet timestamp", options: []layers.IPv4Option{ipv4Timestamp20}},
+		{name: "loose source route with pointer 4 of 15", options: []layers.IPv4Option{longLooseSourceRoute(4), ipv4NOP}, sourceFailed: true},
+		{name: "loose source route with pointer 8 of 15", options: []layers.IPv4Option{longLooseSourceRoute(8), ipv4NOP}, sourceFailed: true},
+		{name: "loose source route with pointer 12 of 15", options: []layers.IPv4Option{longLooseSourceRoute(12), ipv4NOP}, sourceFailed: true},
+		{name: "loose source route with pointer 16 of 15", options: []layers.IPv4Option{longLooseSourceRoute(16), ipv4NOP}},
+		{name: "unexpired source route between stream identifiers", options: []layers.IPv4Option{ipv4StreamID, sourceRoute(131, 4), ipv4StreamID}, sourceFailed: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,6 +180,8 @@ func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 		{name: "hop-by-hop then destination options", first: hbh, headers: cat(optionsHeader(dest), optionsHeader(tcp))},
 		{name: "routing then destination options", first: routing, headers: cat(routingHeader(dest, 0), optionsHeader(tcp))},
 		{name: "hop-by-hop, routing and destination options", first: hbh, headers: cat(optionsHeader(routing), routingHeader(dest, 0), optionsHeader(tcp))},
+
+		// Pointer 43 is the Segments Left octet of a Routing header right after the IPv6 header (TAYGA uses 44).
 		{name: "routing with segments left", first: routing, headers: routingHeader(tcp, 1), pointer: ipv6HeaderLength + 3},
 		{name: "routing with segments left after hop-by-hop", first: hbh, headers: cat(optionsHeader(routing), routingHeader(tcp, 2)), pointer: ipv6HeaderLength + 8 + 3},
 		{name: "routing with segments left before destination options", first: routing, headers: cat(routingHeader(dest, 1), optionsHeader(tcp)), pointer: ipv6HeaderLength + 3},
@@ -206,6 +226,25 @@ func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 				t.Fatalf("IPv6 extension translation changed the TCP segment: %v", packet.ErrorLayer())
 			}
 		})
+	}
+}
+
+// RFC 7915 Section 5.1 (MUST): "those IPv6 extension headers MUST be ignored (i.e., there is no attempt to translate
+// the extension headers) and the packet translated normally."
+//
+// An ICMPv6 Echo behind extension headers becomes an ICMPv4 Echo whose length counts only the ICMP message.
+func TestTranslateIPv6ExtensionHeadersBeforeICMPv6Echo(t *testing.T) {
+	message := ipv6Segment(t, segmentICMP, ipv6Source, ipv6Dest, defaultTTL).Data()[ipv6HeaderLength:]
+	headers := cat(optionsHeader(layers.IPProtocolIPv6Destination), optionsHeader(layers.IPProtocolICMPv6))
+	input := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6HopByHop, headers, message)
+
+	result := translateToICMPv4(t, testTranslator(), input)
+
+	if result.ip.Protocol != layers.IPProtocolICMPv4 || int(result.ip.Length) != ipv4HeaderLength+len(message) {
+		t.Fatalf("got protocol %d and length %d, want 1 and %d", result.ip.Protocol, result.ip.Length, ipv4HeaderLength+len(message))
+	}
+	if result.icmp.TypeCode != layers.CreateICMPv4TypeCode(echoRequest, 0) {
+		t.Fatalf("got ICMPv4 %v, want Echo Request", result.icmp.TypeCode)
 	}
 }
 
@@ -291,7 +330,7 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 // RFC 7915 Section 5.1 (SHOULD): "If the translator gets an illegal source address (e.g., ::1, etc.), the translator
 // SHOULD silently drop the packet."
 //
-// Illegal destinations are rejected as well (local rule: unicast only).
+// Illegal destinations are rejected as well (local rule: unicast only). Neither gets an ICMP error reply.
 func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 	ipv4Illegal := []string{"0.0.0.0", "127.0.0.1", "169.254.1.1", "224.0.0.1", "239.255.255.250", "255.255.255.255"}
 	ipv6Illegal := []string{"::", "::1", "fe80::1", "ff02::1", "ff05::2"}
@@ -315,6 +354,9 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 					if err == nil || result.packet != nil {
 						t.Fatalf("illegal IPv4 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.packet), err)
 					}
+					if result.reply != nil {
+						t.Fatalf("illegal IPv4 %s %s was answered with a reply", test.side, address)
+					}
 				})
 			}
 		}
@@ -331,6 +373,9 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 					result, err := translateIPv6(t, translator, test.packet)
 					if err == nil || result.packet != nil {
 						t.Fatalf("illegal IPv6 %s %s was not rejected: result length=%d err=%v", test.side, address, len(result.packet), err)
+					}
+					if result.reply != nil {
+						t.Fatalf("illegal IPv6 %s %s was answered with a reply", test.side, address)
 					}
 				})
 			}
@@ -545,7 +590,12 @@ func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 // headers Hop-by-Hop (0), Routing (43), Fragment (44) and Destination Options (60) have no IPv4 equivalent, and
 // copying them would make the receiver parse the payload as an extension header. Such packets are rejected, whole or
 // fragmented, while ordinary and unknown protocol numbers are forwarded unchanged.
-func TestTranslateRejectsIPv6ExtensionHeaderProtocolNumbers(t *testing.T) {
+//
+// RFC 7915 Section 4.5: "translators MUST forward all transport protocols"
+//
+// Deviation (docs/rfc-deviations.md): these rejections break that MUST. ICMP of the other family is rejected as well:
+// ICMPv6 (58) in IPv4, and ICMPv4 (1) in IPv6, also behind a Hop-by-Hop or Fragment header.
+func TestTranslateRejectsProtocolNumbersOfTheOtherFamily(t *testing.T) {
 	translate := func(t *testing.T, protocol layers.IPProtocol, flags layers.IPv4Flag) (translation, error) {
 		t.Helper()
 		ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: protocol, Flags: flags, SrcIP: ipv4Source, DstIP: ipv4Dest}
@@ -573,4 +623,52 @@ func TestTranslateRejectsIPv6ExtensionHeaderProtocolNumbers(t *testing.T) {
 			}
 		})
 	}
+
+	// The checksums cover the pseudo-header, so they are valid for the protocol number in the IP header.
+	for _, echoType := range []uint8{echoRequest, 128} {
+		t.Run(fmt.Sprintf("IPv4 protocol 58 with an Echo of type %d", echoType), func(t *testing.T) {
+			message := []byte{echoType, 0, 0, 0, 0, 1, 0, 1, 'h', 'i'}
+			pseudoHeader := cat(ipv4Source, ipv4Dest, []byte{0, byte(layers.IPProtocolICMPv6), 0, byte(len(message))})
+			binary.BigEndian.PutUint16(message[icmpChecksumOffset:], checksum(cat(pseudoHeader, message)))
+			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv6, SrcIP: ipv4Source, DstIP: ipv4Dest}
+			input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(message)), layers.LayerTypeIPv4, gopacket.Default)
+
+			result, err := translateIPv4(t, testTranslator(), input)
+
+			if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.packet != nil {
+				t.Fatalf("got err=%v, packet length %d, want ErrUnsupportedProtocol", err, len(result.packet))
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		first   layers.IPProtocol
+		headers []byte
+	}{
+		{"alone", layers.IPProtocolICMPv4, nil},
+		{"behind a Hop-by-Hop header", layers.IPProtocolIPv6HopByHop, optionsHeader(layers.IPProtocolICMPv4)},
+		{"behind a Fragment header", layers.IPProtocolIPv6Fragment, []byte{byte(layers.IPProtocolICMPv4), 0, 0, 0, 0, 0, 0x12, 0x34}},
+		{"behind a Routing header with segments left", layers.IPProtocolIPv6Routing, routingHeader(layers.IPProtocolICMPv4, 1)},
+	} {
+		t.Run("IPv6 Next Header 1 "+test.name, func(t *testing.T) {
+			message := []byte{echoRequest, 0, 0, 0, 0, 1, 0, 1, 'h', 'i'}
+			pseudoHeader := cat(ipv6Source, ipv6Dest, []byte{0, 0, 0, byte(len(message)), 0, 0, 0, byte(layers.IPProtocolICMPv4)})
+			binary.BigEndian.PutUint16(message[icmpChecksumOffset:], checksum(cat(pseudoHeader, message)))
+			result, err := translateIPv6(t, testTranslator(), ipv6PacketWithHeaders(t, test.first, test.headers, message))
+
+			if !errors.Is(err, siit.ErrUnsupportedProtocol) || result.packet != nil || result.reply != nil {
+				t.Fatalf("got err=%v, packet length %d and reply length %d, want ErrUnsupportedProtocol without a reply", err, len(result.packet), len(result.reply))
+			}
+		})
+	}
+
+	// A Fragment header that is cut off is invalid, whatever its first octet says.
+	t.Run("IPv6 truncated Fragment header holding Next Header 1", func(t *testing.T) {
+		input := ipv6PacketWithHeaders(t, layers.IPProtocolIPv6Fragment, nil, []byte{byte(layers.IPProtocolICMPv4), 0, 0, 0})
+
+		result, err := translateIPv6(t, testTranslator(), input)
+		if !errors.Is(err, siit.ErrInvalidPacket) || result.packet != nil {
+			t.Fatalf("got err=%v, packet length %d, want ErrInvalidPacket", err, len(result.packet))
+		}
+	})
 }
