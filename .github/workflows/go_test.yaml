@@ -25,5 +25,15 @@ jobs:
           ~/.cache/go-build        
         key: "${{ runner.os }}-go-${{ hashFiles('go.sum') }}"
 
+    # Tests live in ./tests, so -coverpkg=. is needed to attribute coverage to the root package.
+    # Only top-level results are shown, plus failing subtests and their messages.
+    # Passing examples are hidden, as is the root package line: its coverage only counts the examples.
     - name: Run tests
-      run: go test ./...
+      shell: bash
+      run: |
+        go test -v -coverpkg=. -coverprofile=coverage.out ./... \
+          | grep -E -- '^(--- |ok|FAIL|\?)|--- FAIL|\.go:[0-9]+: ' \
+          | grep -vE '^--- PASS: Example|^ok\s+github\.com/christiaangoossens/go-siit\s'
+
+    - name: Show coverage
+      run: go tool cover -func=coverage.out
