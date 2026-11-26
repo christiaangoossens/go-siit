@@ -205,10 +205,10 @@ func TestTranslateIPv6FragmentWithExtensionHeaderIsReported(t *testing.T) {
 
 // RFC 7915 Section 4.5 (SHOULD): "when a stateless translator receives the first fragment of a fragmented UDP IPv4
 // packet and the checksum field is zero, the translator SHOULD drop the packet and generate a system management
-// event"
+// event that specifies at least the IP addresses and port numbers in the packet."
 //
-// No system management event is generated (see the README).
-func TestTranslateIPv4ZeroChecksumUDPFirstFragmentDropped(t *testing.T) {
+// The returned error is that event.
+func TestTranslateIPv4ZeroChecksumUDPFirstFragmentRejected(t *testing.T) {
 	ip := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP,
 		Flags: layers.IPv4MoreFragments, SrcIP: ipv4Source, DstIP: ipv4Dest,
@@ -219,7 +219,7 @@ func TestTranslateIPv4ZeroChecksumUDPFirstFragmentDropped(t *testing.T) {
 	binary.BigEndian.PutUint16(udp[4:6], 100) // length of the whole datagram; checksum (octets 6-7) stays zero
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(udp)), layers.LayerTypeIPv4, gopacket.Default)
 	result, err := translateIPv4(t, testTranslator(), input)
-	requireDropped(t, result, err)
+	requireZeroUDPChecksumError(t, result, err, endpoint(ipv4Source, testSourcePort), endpoint(ipv4Dest, dnsPort))
 }
 
 // RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain

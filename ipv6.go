@@ -146,9 +146,10 @@ func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPack
 			return packet, &TranslationError{Err: ErrTimeExceeded, Packet: packet.Packet}
 		}
 
-		// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum".
+		// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the
+		// error."
 		if isZeroUDPChecksum(payload, protocol) {
-			return translated, nil
+			return translated, zeroUDPChecksumError(ip.SrcIP, ip.DstIP, payload)
 		}
 
 		// Validate transport checksums

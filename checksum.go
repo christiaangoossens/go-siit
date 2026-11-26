@@ -2,7 +2,9 @@ package siit
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
+	"strconv"
 
 	"github.com/google/gopacket/layers"
 )
@@ -113,4 +115,12 @@ func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
 	udp, _ := checksummedProtocol(layers.IPProtocolUDP)
 	offset := udp.checksumOffset
 	return protocol == layers.IPProtocolUDP && len(payload) >= offset+2 && binary.BigEndian.Uint16(payload[offset:]) == 0
+}
+
+// zeroUDPChecksumError names the addresses and ports of a UDP payload that isZeroUDPChecksum accepted, so the caller
+// can log it.
+func zeroUDPChecksumError(source, destination net.IP, payload []byte) error {
+	sourcePort := strconv.Itoa(int(binary.BigEndian.Uint16(payload[0:2])))
+	destinationPort := strconv.Itoa(int(binary.BigEndian.Uint16(payload[2:4])))
+	return fmt.Errorf("%w: %s -> %s", ErrZeroUDPChecksum, net.JoinHostPort(source.String(), sourcePort), net.JoinHostPort(destination.String(), destinationPort))
 }

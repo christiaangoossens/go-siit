@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 
 	siit "github.com/christiaangoossens/go-siit"
@@ -170,11 +172,27 @@ func zeroUDPChecksum(t *testing.T, packet gopacket.Packet, headerLength int) []b
 	return data
 }
 
-// RFC 8200 Section 8.1: an IPv6 UDP packet with a zero checksum is invalid and dropped.
-func TestTranslateIPv6ZeroChecksumUDPDropsPacket(t *testing.T) {
+// RFC 8200 Section 8.1: "IPv6 receivers must discard UDP packets containing a zero checksum and should log the error."
+func TestTranslateIPv6ZeroChecksumUDPRejectsPacket(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv6Segment(t, segmentUDP, ipv6Source, ipv6Dest, defaultTTL), ipv6HeaderLength)
 	result, err := translateIPv6(t, testTranslator(), gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.Default))
-	requireDropped(t, result, err)
+	requireZeroUDPChecksumError(t, result, err, endpoint(ipv6Source, testSourcePort), endpoint(ipv6Dest, testUDPDestinationPort))
+}
+
+func endpoint(ip net.IP, port int) string { return net.JoinHostPort(ip.String(), strconv.Itoa(port)) }
+
+// requireZeroUDPChecksumError requires a rejection whose error names the addresses and ports, so the caller can log it.
+func requireZeroUDPChecksumError(t *testing.T, result translation, err error, endpoints ...string) {
+	t.Helper()
+	if !errors.Is(err, siit.ErrZeroUDPChecksum) || result.packet != nil {
+		t.Fatalf("got err=%v, packet length %d, want ErrZeroUDPChecksum", err, len(result.packet))
+	}
+
+	for _, endpoint := range endpoints {
+		if !strings.Contains(err.Error(), endpoint) {
+			t.Fatalf("error %q does not name %s", err, endpoint)
+		}
+	}
 }
 
 // RFC 7915 Section 4.5 (SHOULD): "the translator SHOULD provide a configuration function to allow: ... 2.

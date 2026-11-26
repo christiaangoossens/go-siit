@@ -169,6 +169,12 @@ func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPack
 		ipv6.Length = uint16(length)
 		payload = ip.Payload
 
+		// RFC 7915 Section 4.5: "the translator SHOULD drop the packet and generate a system management event that
+		// specifies at least the IP addresses and port numbers in the packet."
+		if fragmented && !quoted && ip.FragOffset == 0 && isZeroUDPChecksum(payload, ip.Protocol) {
+			return translated, zeroUDPChecksumError(ip.SrcIP, ip.DstIP, payload)
+		}
+
 		// Only the first fragment holds the transport header.
 		if ip.FragOffset == 0 {
 			payload, dropped = translateTransport(ip.Protocol, payload, removed, added, quoted)
