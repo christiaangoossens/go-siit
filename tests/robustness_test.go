@@ -100,7 +100,8 @@ func TestTranslateForwardsOtherProtocols(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.2 (SHOULD): "normal" IGMP messages are single-hop messages and are silently dropped.
+// RFC 7915 Section 4.2 (SHOULD): "IGMP messages are single-hop messages and SHOULD be silently dropped by the
+// translator."
 func TestTranslateDropsIGMP(t *testing.T) {
 	ip := &layers.IPv4{Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolIGMP, SrcIP: ipv4Source, DstIP: ipv4Dest}
 	input := gopacket.NewPacket(serializeTestPacket(t, ip, gopacket.Payload(make([]byte, 8))), layers.LayerTypeIPv4, gopacket.Default)

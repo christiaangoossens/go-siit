@@ -37,9 +37,12 @@ var (
 	ipv4Timestamp   = layers.IPv4Option{OptionType: 68, OptionLength: 8, OptionData: []byte{5, 0, 0, 0, 0, 0}}
 )
 
-// RFC 7915 Section 4.1 (MUST): IPv4 options are ignored and the packet is translated normally, except that an
-// unexpired source route must be discarded instead (RFC 791 Section 3.1: a route is used up once its pointer
-// lies beyond the option) and answered with Destination Unreachable, Source Route Failed (SHOULD).
+// RFC 7915 Section 4.1 (MUST): "If any IPv4 options are present in the IPv4 packet, they MUST be ignored and the
+// packet translated normally; there is no attempt to translate the options. However, if an unexpired source route
+// option is present, then the packet MUST instead be discarded, and an ICMPv4 'Destination Unreachable, Source Route
+// Failed' (Type 3, Code 5) error message SHOULD be returned to the sender."
+//
+// A route is used up once its pointer lies beyond the option (RFC 791 Section 3.1).
 func TestTranslateIPv4Options(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -100,9 +103,10 @@ func TestTranslateIPv4Options(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.1 (MUST) with RFC 1122 Section 3.2.2 / RFC 1812 Section 4.3.2.7: an ICMP error is never
-// answered with another ICMP error, so an ICMPv4 error that carries an unexpired source route is dropped silently
-// instead of triggering a Source Route Failed message. Regression guard: this case used to generate the error.
+// RFC 1812 Section 4.3.2.7 (MUST NOT): "An ICMP error message MUST NOT be sent as the result of receiving: ... An
+// ICMP error message"
+//
+// Regression guard: an ICMPv4 error with an unexpired source route used to generate Source Route Failed.
 func TestTranslateIPv4ICMPErrorWithSourceRouteIsDroppedSilently(t *testing.T) {
 	ip := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolICMPv4, SrcIP: ipv4Dest, DstIP: ipv4Source,
@@ -132,11 +136,16 @@ func routingHeader(next layers.IPProtocol, segmentsLeft uint8) []byte {
 
 func cat(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
-// RFC 7915 Section 5.1 (MUST): IPv6 extension headers that have no IPv4 equivalent are skipped, including when
-// chained; a Routing header with Segments Left > 0 is not translated and answered with a Parameter Problem that
-// points at the Segments Left octet (SHOULD; RFC 4443 Section 3.4), counting the headers that precede it, and quotes
-// the whole invoking packet. The row "routing with segments left after hop-by-hop" is a regression guard: the
-// Parameter Problem used to drop a leading Hop-by-Hop header from its quote.
+// RFC 7915 Section 5.1 (MUST): "those IPv6 extension headers MUST be ignored (i.e., there is no attempt to translate
+// the extension headers) and the packet translated normally."
+//
+// RFC 7915 Section 5.1 (SHOULD): "If a Routing header with a non-zero Segments Left field is present, then the packet
+// MUST NOT be translated, and an ICMPv6 'parameter problem/erroneous header field encountered' (Type 4, Code 0) error
+// message, with the Pointer field indicating the first byte of the Segments Left field, SHOULD be returned to the
+// sender."
+//
+// The row "routing with segments left after hop-by-hop" is a regression guard: the Parameter Problem used to drop a
+// leading Hop-by-Hop header from its quote. The Pointer counts the headers before the Routing header too.
 func TestTranslateIPv6ExtensionHeaders(t *testing.T) {
 	const tcp, hbh, dest, routing = layers.IPProtocolTCP, layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Destination, layers.IPProtocolIPv6Routing
 	tests := []struct {
@@ -223,9 +232,11 @@ func TestTranslateIPv6IgnoresOctetsAfterPayloadLength(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.1 (MUST) with RFC 4443 Section 2.4 (e): an ICMPv6 error behind a Routing header with
-// Segments Left > 0 is not translated, but it must not be answered with a Parameter Problem either. Regression
-// guard: this case used to generate the Parameter Problem.
+// RFC 4443 Section 2.4 (MUST NOT): "An ICMPv6 error message MUST NOT be originated as a result of receiving the
+// following: (e.1) An ICMPv6 error message."
+//
+// Regression guard: an ICMPv6 error behind a Routing header with Segments Left > 0 used to generate a Parameter
+// Problem.
 func TestTranslateIPv6ICMPErrorWithSegmentsLeftIsDroppedSilently(t *testing.T) {
 	quote := ipv6TCPPacket(t, defaultTTL).Data()
 	icmp := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(icmpv6DestUnreachable, 4)}
@@ -272,10 +283,13 @@ func TestTranslateRejectsInconsistentPayloadLengths(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.1 (SHOULD, with RFC 1812 Section 5.3.7) and Section 5.1 / RFC 4291 (local scope: unicast
-// only): packets with an illegal source or destination address (unspecified, loopback, link-local, multicast,
-// broadcast) are rejected in both directions, for the Well-Known Prefix and for a Network-Specific Prefix, which
-// accepts every other IPv4 address. Addresses inside an ICMP error quote are covered in TestTranslateDropsInvalidQuotes.
+// RFC 7915 Section 4.1 (SHOULD): "If the translator gets an illegal source address (e.g., 0.0.0.0, 127.0.0.1, etc.),
+// the translator SHOULD silently discard the packet"
+//
+// RFC 7915 Section 5.1 (SHOULD): "If the translator gets an illegal source address (e.g., ::1, etc.), the translator
+// SHOULD silently drop the packet."
+//
+// Illegal destinations are rejected as well (local rule: unicast only).
 func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 	ipv4Illegal := []string{"0.0.0.0", "127.0.0.1", "169.254.1.1", "224.0.0.1", "239.255.255.250", "255.255.255.255"}
 	ipv6Illegal := []string{"::", "::1", "fe80::1", "ff02::1", "ff05::2"}
@@ -322,9 +336,10 @@ func TestTranslateRejectsIllegalAddresses(t *testing.T) {
 	}
 }
 
-// RFC 7915 Sections 4.1 and 5.1 (MUST): an IPv4 TTL or IPv6 Hop Limit of 0 or 1 is not forwarded; the translator
-// answers with a complete Time Exceeded (MUST) that quotes the original packet, except for ICMP errors, which
-// never trigger another ICMP error (RFC 4443 Section 2.4 (e), RFC 1122 Section 3.2.2).
+// RFC 7915 Sections 4.1 and 5.1 (MUST): "the translator (as any router) MUST check for zero and send the ICMPv4 'TTL
+// Exceeded' or ICMPv6 'Hop Limit Exceeded' error."
+//
+// ICMP errors never trigger another ICMP error (RFC 4443 Section 2.4, RFC 1122 Section 3.2.2).
 func TestTranslateExpiredTTL(t *testing.T) {
 	for _, ttl := range []uint8{0, 1} {
 		t.Run(fmt.Sprintf("IPv4 TTL %d", ttl), func(t *testing.T) {
@@ -428,11 +443,11 @@ func TestTranslateIPv6ToIPv4SetsIdentification(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 5.1 (SHOULD for the source, local for the destination) with RFC 1812 Section 5.3.7: with a
-// Network-Specific Prefix every IPv4 address can be embedded, so an IPv6 address embedding an unspecified, loopback,
-// link-local, multicast or broadcast IPv4 address would be translated into an illegal IPv4 source or destination. It
-// is rejected like the IPv4 direction. Explicit address mappings (RFC 7757) are exempt, and a global address still
-// translates.
+// RFC 7915 Section 5.1 (SHOULD): "If the translator gets an illegal source address (e.g., ::1, etc.), the translator
+// SHOULD silently drop the packet."
+//
+// With a Network-Specific Prefix, an IPv6 address can embed an illegal IPv4 address (RFC 1812 Section 5.3.7). It is
+// rejected as a source and, as a local rule, as a destination. Explicit address mappings (RFC 7757) are exempt.
 func TestTranslateRejectsIllegalEmbeddedIPv4Addresses(t *testing.T) {
 	embed := func(prefix string, address string) net.IP {
 		ipv4 := net.ParseIP(address).To4()

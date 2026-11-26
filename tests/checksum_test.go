@@ -22,8 +22,13 @@ var (
 	}
 )
 
-// RFC 7915 Sections 4.5 and 5.5 (MUST): the transport checksum is updated for the changed pseudo-header (and for
-// ICMP the dropped or added pseudo-header, Sections 4.2 and 5.2), whichever addresses the mapping produces.
+// RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain
+// pseudo-headers need to be performed. Translators MUST do this for TCP and ICMP packets and for UDP packets that
+// contain a UDP checksum"
+//
+// RFC 7915 Section 5.5 (MUST): "Translators MUST do this for TCP, UDP, and ICMP."
+//
+// For ICMP the pseudo-header is added or dropped (RFC 7915 Sections 4.2 and 5.2).
 func TestTranslatedChecksumsCoverTheNewPseudoHeader(t *testing.T) {
 	mappings := []struct {
 		name       string
@@ -172,9 +177,10 @@ func TestTranslateIPv6ZeroChecksumUDPDropsPacket(t *testing.T) {
 	requireDropped(t, result, err)
 }
 
-// RFC 7915 Section 4.5 (SHOULD) with RFC 768: an unfragmented IPv4 UDP datagram without a checksum is
-// translated with a newly computed IPv6 checksum (the second of the two permitted behaviours; the other, dropping
-// the packet, is not implemented, see the README).
+// RFC 7915 Section 4.5 (SHOULD): "the translator SHOULD provide a configuration function to allow: ... 2.
+// Calculating an IPv6 checksum and forwarding the packet"
+//
+// The first behaviour, dropping the packet, is not implemented (see the README).
 func TestTranslateIPv4ZeroChecksumUDPGetsComputedChecksum(t *testing.T) {
 	data := zeroUDPChecksum(t, ipv4Segment(t, segmentUDP, ipv4Source, ipv4Dest, defaultTTL), ipv4HeaderLength)
 	result := mustTranslate(t, func() (translation, error) {

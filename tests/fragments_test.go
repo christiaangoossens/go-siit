@@ -12,11 +12,11 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.1, 5.1 and 5.1.1 (MUST): fragments are translated one by one, without reassembly. An IPv4
-// fragment gets an IPv6 Fragment header carrying its offset, More Fragments flag and Identification (extended to 32
-// bits); an IPv6 Fragment header becomes the IPv4 offset, MF flag and the low 16 bits of the Identification, with DF
-// cleared. IPv4 options and IPv6 extension headers in front of the fragment header are skipped, an atomic fragment
-// (offset 0, M=0) is a fragment with MF=0, and the payload is carried over unchanged.
+// RFC 7915 Section 5.1.1 (MUST): "If the Next Header field of the Fragment Header is not an extension header (except
+// ESP), then Fragment Offset MUST be copied from the Fragment Offset field of the IPv6 Fragment Header."
+//
+// Fragments are translated one by one, without reassembly, in both directions (RFC 7915 Sections 4.1 and 5.1.1).
+// Towards IPv4 only the low 16 bits of the Identification are kept.
 func TestTranslateFragments(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -184,8 +184,10 @@ func serializeIPv6FragmentPacket(t *testing.T, ip *layers.IPv6, fragment *layers
 	return serializeTestPacket(t, ip, gopacket.Payload(append(ipv6FragmentHeader(fragment), payload...)))
 }
 
-// RFC 7915 Section 5.1.1 (SHOULD): a fragment followed by an extension header is dropped with an error, so the
-// caller can log it.
+// RFC 7915 Section 5.1.1 (SHOULD): "If the Next Header field of the Fragment Header is an extension header (except
+// ESP), then the packet SHOULD be dropped and logged."
+//
+// The error lets the caller log it.
 func TestTranslateIPv6FragmentWithExtensionHeaderIsReported(t *testing.T) {
 	for _, next := range []layers.IPProtocol{layers.IPProtocolIPv6HopByHop, layers.IPProtocolIPv6Routing, layers.IPProtocolIPv6Destination, layers.IPProtocolAH} {
 		t.Run(next.String(), func(t *testing.T) {
@@ -201,8 +203,11 @@ func TestTranslateIPv6FragmentWithExtensionHeaderIsReported(t *testing.T) {
 	}
 }
 
-// RFC 7915 Section 4.5 (SHOULD, see the README) and Section 1.2: a stateless translator cannot compute the UDP
-// checksum of a fragmented datagram, so the first fragment of a zero-checksum IPv4 UDP datagram is silently dropped.
+// RFC 7915 Section 4.5 (SHOULD): "when a stateless translator receives the first fragment of a fragmented UDP IPv4
+// packet and the checksum field is zero, the translator SHOULD drop the packet and generate a system management
+// event"
+//
+// No system management event is generated (see the README).
 func TestTranslateIPv4ZeroChecksumUDPFirstFragmentDropped(t *testing.T) {
 	ip := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: defaultTTL, Protocol: layers.IPProtocolUDP,
@@ -217,8 +222,13 @@ func TestTranslateIPv4ZeroChecksumUDPFirstFragmentDropped(t *testing.T) {
 	requireDropped(t, result, err)
 }
 
-// RFC 7915 Sections 4.5 and 5.5 (MUST): with a mapping that changes the pseudo-header the transport checksum must
-// be updated, which a stateless translator can do for the first fragment because the checksum field is in its header.
+// RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain
+// pseudo-headers need to be performed. Translators MUST do this for TCP and ICMP packets and for UDP packets that
+// contain a UDP checksum"
+//
+// RFC 7915 Section 5.5 (MUST): "Translators MUST do this for TCP, UDP, and ICMP."
+//
+// The EAM mapping changes the pseudo-header sum, so the checksum must really change; only the first fragment holds it.
 func TestTranslateFirstFragmentUpdatesChecksum(t *testing.T) {
 	translator := testTranslatorWithEAM(eamTable)
 	// Every fragment but the last must be a multiple of 8 octets: a TCP header is 20 octets, a UDP header 8.

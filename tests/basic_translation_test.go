@@ -12,11 +12,11 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.1 and 5.1 (MUST): the IP header fields are translated. Version, header length, Total Length /
-// Payload Length and protocol follow from the new header; the TTL / Hop Limit is decremented by one; the
-// Traffic Class and TOS (including the ECN bits) are copied (RFC 7915 SHOULD offer an option to ignore them, see
-// the README); the Flow Label is zero towards IPv6; and an IPv6 packet of at most 1260 octets (IPv4 length) clears DF, a larger one sets it (RFC 7915 Section 5.1). The DF bit of an unfragmented IPv4 packet
-// does not produce a Fragment header.
+// RFC 7915 Section 5 (MUST): "When the resulting IPv4 packet is smaller than or equal to 1260 bytes, the translator
+// MUST send the packet with a cleared Don't Fragment bit. Otherwise, the packet MUST be sent with the Don't Fragment
+// bit set."
+//
+// The other header fields follow RFC 7915 Sections 4.1 and 5.1. TOS / Traffic Class is always copied (see the README).
 func TestTranslateIPHeaderFields(t *testing.T) {
 	for _, tos := range []uint8{0, 0x2e << 2, 0x03, 0xff} {
 		for _, ttl := range []uint8{2, defaultTTL, 255} {
@@ -94,8 +94,11 @@ func translateIPv4Raw(t *testing.T, data []byte) gopacket.Packet {
 	return gopacket.NewPacket(result, layers.LayerTypeIPv6, gopacket.Default)
 }
 
-// RFC 7915 Sections 4.5 and 5.5 (MUST): TCP and UDP payloads of empty, odd, even and large lengths, and TCP options,
-// survive a translation in each direction and keep a valid checksum for the new pseudo-header.
+// RFC 7915 Section 4.5 (MUST): "the recalculation and updating of the transport-layer headers that contain
+// pseudo-headers need to be performed. Translators MUST do this for TCP and ICMP packets and for UDP packets that
+// contain a UDP checksum"
+//
+// RFC 7915 Section 5.5 (MUST): "Translators MUST do this for TCP, UDP, and ICMP."
 func TestTranslateTransportPayloads(t *testing.T) {
 	mss := []layers.TCPOption{{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}}
 	wscale := []layers.TCPOption{{OptionType: layers.TCPOptionKindNop, OptionLength: 1}, {OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{7}}}

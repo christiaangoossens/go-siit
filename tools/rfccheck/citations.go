@@ -130,9 +130,9 @@ func scanText(path string, firstLine int, text string) []citation {
 				citations = append(citations, citation{position: position, rfc: rfc})
 			}
 		case referencePattern:
-			cited := rfc
+			cited, named := rfc, false
 			if trailing := trailingRFC.FindStringSubmatch(text[found.end:]); trailing != nil {
-				cited, trailingEnd = atoi(trailing[1]), found.end+len(trailing[0])
+				cited, named, trailingEnd = atoi(trailing[1]), true, found.end+len(trailing[0])
 			}
 
 			directlyAfterRFC := previous != nil && previous.pattern == rfcPattern && onlySeparators.MatchString(gap)
@@ -142,7 +142,7 @@ func scanText(path string, firstLine int, text string) []citation {
 
 			last := &citations[len(citations)-1]
 			addReferences(last, found.groups[1], found.groups[2])
-			if cited == rfc && rfc != 0 && sentenceEnd.MatchString(text[rfcEnd:found.start]) {
+			if !named && rfc != 0 && sentenceEnd.MatchString(text[rfcEnd:found.start]) {
 				last.problems = append(last.problems, fmt.Sprintf("%s %s is not in the same sentence as RFC %d, name the RFC", found.groups[1], found.groups[2], rfc))
 			}
 		case levelPattern:

@@ -56,9 +56,11 @@ func embedIPv4(prefix net.IP, length int, ipv4 net.IP) net.IP {
 	return address
 }
 
-// RFC 6052 Sections 2.2 (MUST) and 2.3: an IPv4 address is embedded in, and extracted from, an IPv6 address
-// according to the prefix length (32, 40, 48, 56, 64 or 96), with the "u" octet (bits 64-71) skipped and a zero
-// suffix. The first address is the example of Section 2.4, Table 1; the others come from a reference implementation.
+// RFC 6052 Section 2.2: "The prefixes can only have one of the following lengths: 32, 40, 48, 56, 64, or 96."
+//
+// RFC 6052 Section 2.2 (MUST): "Bits 64 to 71 of the address are reserved ... These bits MUST be set to zero."
+//
+// The IPv4 address is embedded as in the figure of RFC 6052 Section 2.2. The first address is the example of RFC 6052 Section 2.4, Table 1; the others come from a reference implementation.
 func TestRFC6052AddressFormat(t *testing.T) {
 	tests := []struct {
 		prefix  string
@@ -99,10 +101,10 @@ func TestRFC6052AddressFormat(t *testing.T) {
 	}
 }
 
-// RFC 6052 Section 3.1 (MUST for the Well-Known Prefix): the Well-Known Prefix is not used for non-global IPv4
-// addresses, and a packet in which either address is a Well-Known Prefix address with a non-global IPv4 address is
-// dropped. The matrix includes the neighbours of each range, which must still be translated. A Network-Specific
-// Prefix has no such restriction (it still refuses addresses that can never be unicast hosts).
+// RFC 6052 Section 3.1 (MUST NOT): "Address translators MUST NOT translate packets in which an address is composed of
+// the Well-Known Prefix and a non-global IPv4 address; they MUST drop these packets."
+//
+// The neighbours of each range must still be translated. A Network-Specific Prefix has no such restriction.
 func TestTranslateWellKnownPrefixAddressRestrictions(t *testing.T) {
 	tests := []struct {
 		address string
@@ -183,9 +185,14 @@ func TestRFC6052IgnoresNonZeroSuffixBits(t *testing.T) {
 	}
 }
 
-// RFC 6052 Sections 2.2 and 2.3 (MUST) and RFC 7757 Sections 3.1 and 3.2: the translator refuses configurations
-// that violate the specifications: unsupported prefix lengths, a /96 prefix with the reserved "u" octet set, a
-// missing or IPv6 router address, and EAM tables with conflicting or malformed entries.
+// RFC 6052 Section 2.2 (MUST): "When using a /96 Network-Specific Prefix, the administrators MUST ensure that the
+// bits 64 to 71 are set to zero."
+//
+// RFC 7757 Section 3.2 (MUST): "An EAM's IPv4 prefix value MUST have an identical or smaller number of suffix bits
+// than its corresponding IPv6 prefix value."
+//
+// The allowed prefix lengths are listed in RFC 6052 Section 2.2. The other rows (router address, duplicate or
+// malformed EAM entries) are local configuration checks.
 func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 	parse := func(prefix string) *net.IPNet {
 		_, network, err := net.ParseCIDR(prefix)
@@ -233,10 +240,16 @@ func TestNewTranslatorRejectsInvalidConfiguration(t *testing.T) {
 	})
 }
 
-// RFC 7757 Sections 3.1-3.3 (MUST): the EAM table maps by longest-prefix match in either column, the host bits
-// are carried over (and excess IPv6 suffix bits are discarded on the way to IPv4), prefixes without a length are
-// single hosts, an address without an entry falls back to the RFC 6052 prefix, and every packet address is
-// translated independently. The first table is Figure 1 of the RFC.
+// RFC 7757 Section 3.2 (MUST): "The prefix length MAY be omitted, in which case the implementation MUST assume it to
+// be 32 for IPv4 and 128 for IPv6."
+//
+// RFC 7757 Section 3.2 (MUST): "an SIIT implementation MUST individually translate each IP address it encounters in
+// the packet's IP headers"
+//
+// RFC 7757 Section 3.3.1 (MUST): "If no matching EAM entry is found, the EAM algorithm is aborted. The SIIT
+// implementation MUST proceed to translate the address in accordance with [RFC6145] (and its updates)."
+//
+// The first table is Figure 1 of RFC 7757.
 func TestEAMMappings(t *testing.T) {
 	type mapping struct {
 		ipv4, ipv6 string

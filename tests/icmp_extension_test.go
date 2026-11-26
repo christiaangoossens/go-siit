@@ -34,11 +34,13 @@ func opaqueExtension(size int) []byte {
 	return extension
 }
 
-// RFC 7915 Sections 4.2 and 5.2 (MUST) with RFC 4884 Sections 3, 4 and 7: an ICMP extension structure is carried
-// over after the translated quote, and the Length attribute (octet 5 in 32-bit words for ICMPv4, octet 4 in 64-bit
-// words for ICMPv6) is recomputed for the translated, zero-padded original datagram. The quoted packet grows by 20
-// octets towards IPv6 and shrinks by 20 towards IPv4, so the length changes with the size of the quote in both
-// directions. Extensions are only defined for Destination Unreachable and Time Exceeded.
+// RFC 7915 Section 4.2 (MUST): "the ICMPv6 Extension length attribute MUST be adjusted accordingly (e.g., longer due
+// to the translation from IPv4 to IPv6)."
+//
+// RFC 7915 Section 5.2 (MUST): "the ICMPv6 Extension length attribute MUST be adjusted accordingly (e.g., shorter due
+// to the translation from IPv6 to IPv4)."
+//
+// The Length attribute (RFC 4884) counts 32-bit words for ICMPv4 and 64-bit words for ICMPv6.
 func TestTranslateICMPExtensions(t *testing.T) {
 	extension := icmpExtension()
 	for _, size := range []int{60, 100, 124, 128, 148, 200} {
@@ -76,9 +78,10 @@ func requireQuotedTCPv6Prefix(t *testing.T, quote gopacket.Packet, source, desti
 	}
 }
 
-// RFC 7915 Section 4.2 (SHOULD, left out when it cannot be truncated, see the README) with RFC 4884 Section 5:
-// when the extension no longer fits next to a 128-octet quote in the 1280-octet ICMPv6 message, the message is
-// sent with the translated quote only, and the Length attribute is zero.
+// RFC 7915 Section 4.2 (SHOULD): "If the ICMPv4 Extension exceeds the maximum size of an ICMPv6 message on the
+// outgoing interface, the ICMPv4 extension SHOULD be simply truncated."
+//
+// The library leaves it out instead (see the README), with a Length attribute of zero.
 func TestTranslateICMPExtensionThatDoesNotFitIsLeftOut(t *testing.T) {
 	quote := ipv4TCPPayloadPacket(t, make([]byte, 128-ipv4HeaderLength-20), nil).Data()
 	input := ipv4ICMPErrorWithExtension(t, layers.ICMPv4TypeDestinationUnreachable, 3, paddedDatagram(quote, 4), opaqueExtension(1300))

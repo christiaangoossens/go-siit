@@ -147,6 +147,12 @@ func (d *document) sectionText(number string) string {
 	return strings.Join(parts, " ")
 }
 
+// lineBreakJoin matches a word split after a hyphen or slash at a line break, like "non-\n   global".
+var lineBreakJoin = regexp.MustCompile(`(\w)([-/])\s*\n\s*(\w)`)
+
+// normalize collapses whitespace, rejoins words split at a line break, and turns double quotes into single quotes,
+// so a quote in a comment can write the RFC's inner "TTL Exceeded" as 'TTL Exceeded'.
 func normalize(text string) string {
+	text = strings.ReplaceAll(lineBreakJoin.ReplaceAllString(text, "$1$2$3"), `"`, "'")
 	return strings.Join(strings.Fields(text), " ")
 }

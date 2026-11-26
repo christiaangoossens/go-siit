@@ -9,9 +9,9 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// RFC 7915 Sections 4.2 and 5.2 (MUST): Echo Request and Reply are translated in both directions, keeping
-// Identifier, Sequence Number and data, with the ICMPv6 pseudo-header added or dropped in the checksum
-// (Sections 4.5 and 5.5; the checksum values themselves are covered in checksum_test.go).
+// RFC 7915 Sections 4.2 and 5.2 (MUST): "packets MUST have the Type translated"
+//
+// Echo Request and Reply keep their Identifier, Sequence Number and data.
 func TestTranslateICMPEcho(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -142,8 +142,11 @@ func TestTranslateICMPParameterProblemPointers(t *testing.T) {
 	})
 }
 
-// RFC 7915 Sections 4.2 and 5.2 (MUST): Destination Unreachable code 2 becomes Parameter Problem code 1 pointing
-// at the IPv6 Next Header (6), and Parameter Problem code 1 becomes Destination Unreachable code 2 (Protocol).
+// RFC 7915 Section 4.2: "Code 2 (Protocol Unreachable): Translate to an ICMPv6 Parameter Problem (Type 4, Code 1) and
+// make the Pointer point to the IPv6 Next Header field."
+//
+// RFC 7915 Section 5.2: "Code 1 (Unrecognized Next Header type encountered): Translate this to an ICMPv4 protocol
+// unreachable (Type 3, Code 2)."
 func TestTranslateProtocolUnreachableAndUnrecognizedNextHeader(t *testing.T) {
 	v6 := translateToICMPv6(t, testTranslator(), ipv4ICMPPacket(t, layers.ICMPv4TypeDestinationUnreachable, 2, ipv4TCPPacket(t, defaultTTL).Data()))
 	if v6.icmp.TypeCode != layers.CreateICMPv6TypeCode(layers.ICMPv6TypeParameterProblem, 1) || icmpPointerValue(t, v6.icmp.Payload) != 6 {
