@@ -29,20 +29,24 @@ type Translator struct {
 	mtu uint32
 }
 
-// Config configures a Translator. Only NAT64Prefix and IPv4RouterAddress are required. Host bits of prefixes are
-// ignored.
+// Config configures a Translator. Only NAT64Prefix and IPv4RouterAddress are required. Bits after a prefix length (host
+// bits) are ignored, so 192.0.2.5/24 is read as 192.0.2.0/24.
 type Config struct {
-	// RFC 6052 prefix that IPv4 addresses are embedded in: a /32, /40, /48, /56, /64 or /96 IPv6 prefix.
+	// The IPv6 prefix that IPv4 addresses are put into (embedded in, RFC 6052): a /32, /40, /48, /56, /64 or /96
+	// prefix. With 64:ff9b::/96, the IPv4 address 1.2.3.4 becomes 64:ff9b::102:304. Most NAT64 networks use
+	// 64:ff9b::/96 (the Well-Known Prefix).
 	NAT64Prefix netip.Prefix
 
-	// IPv4 address of the translator. It is the source of the ICMP errors the translator generates (mapped to IPv6
-	// for an ICMPv6 error), and of translated ICMPv4 errors whose IPv6 source has no IPv4 mapping (RFC 6791). It must
-	// be a unicast address. A non-global address with the Well-Known Prefix needs an EAM entry, which then gives the
-	// IPv6 address of the translator.
+	// An IPv4 address that stands for the translator itself. It is the sender of the error messages the translator
+	// creates. It also replaces the source of an error message from an IPv6 router that has no IPv4 address
+	// (RFC 6791).
+	//
+	// With 64:ff9b::/96 and a private (non-global) address such as 192.0.0.254, add an EAM entry that maps this address to a
+	// public IPv6 address of this machine.
 	IPv4RouterAddress netip.Addr
 
-	// Explicit address mappings (RFC 7757), which take precedence over NAT64Prefix. May be empty. The table is copied,
-	// so changing it afterwards does not affect the translator.
+	// Fixed address mappings (Explicit Address Mappings, RFC 7757), such as 'IPv4 192.0.2.1 is IPv6 2001:db8::1'. They take precedence over
+	// NAT64Prefix. May be empty. The table is copied, so changing it afterwards does not affect the translator.
 	EAMTable EAMTable
 
 	// IPv6 path MTU, at least 1280. Zero means 1280.

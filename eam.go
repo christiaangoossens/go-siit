@@ -8,14 +8,15 @@ import (
 
 // RFC 7757 (EAMT)
 
-// EAMEntry maps an IPv4 prefix to an IPv6 prefix. A single address is a prefix of 32 or 128 bits. Host bits are
-// ignored.
+// EAMEntry is a fixed rule (an Explicit Address Mapping) that maps an IPv4 prefix to an IPv6 prefix. A single address
+// is a prefix of 32 or 128 bits. Bits after the prefix length (host bits) are ignored, so 192.0.2.5/24 is read as
+// 192.0.2.0/24.
 type EAMEntry struct {
 	IPv4Prefix netip.Prefix
 	IPv6Prefix netip.Prefix
 }
 
-// EAMTable is a collection of explicit address mappings. The longest matching prefix wins.
+// EAMTable is a list of fixed address mappings. When several entries match an address, the longest prefix wins.
 type EAMTable []EAMEntry
 
 // ParseEAMEntry parses an entry from its text form, like ParseEAMEntry("192.0.2.0/24", "2001:db8::/120"), and checks
