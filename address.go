@@ -110,19 +110,20 @@ func mapIPv6ToIPv4RFC6052(prefix *net.IPNet, ipv6 net.IP) net.IP {
 
 // isForbiddenIPv4 reports whether RFC 6052 Section 3.1 forbids translating this IPv4 address. EAM entries are explicit and therefore exempt.
 func (t *Translator) isForbiddenIPv4(ipv4 net.IP) bool {
-	if t.mapIPv4ToIPv6EAM(ipv4) != nil {
+	// The EAM lookup is the most expensive check, so it goes last.
+	if !t.wellKnownPrefix || !isNonGlobalIPv4(ipv4) {
 		return false
 	}
 
-	return isWellKnownPrefix(t.nat64Net) && isNonGlobalIPv4(ipv4)
+	return t.mapIPv4ToIPv6EAM(ipv4) == nil
 }
 
 func (t *Translator) isForbiddenIPv6(ipv6 net.IP) bool {
-	if !isWellKnownPrefix(t.nat64Net) || t.mapIPv6ToIPv4EAM(ipv6) != nil || !t.nat64Net.Contains(ipv6) {
+	if !t.wellKnownPrefix || !t.nat64Net.Contains(ipv6) || !isNonGlobalIPv4(mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6)) {
 		return false
 	}
 
-	return isNonGlobalIPv4(mapIPv6ToIPv4RFC6052(t.nat64Net, ipv6))
+	return t.mapIPv6ToIPv4EAM(ipv6) == nil
 }
 
 // isIllegalIPv4Embedded reports whether an IPv6 address inside the NAT64 prefix embeds an IPv4 address that is not

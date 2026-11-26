@@ -11,12 +11,20 @@ import (
  * Internet checksum (RFC 1071, RFC 1624)
  */
 
+type transportChecksum struct{ headerLength, checksumOffset int }
+
 // Minimum length and checksum offset of every transport protocol with a checksum.
-var checksummedProtocols = map[layers.IPProtocol]struct{ headerLength, checksumOffset int }{
-	layers.IPProtocolTCP:    {20, 16},
-	layers.IPProtocolUDP:    {8, 6},
-	layers.IPProtocolICMPv4: {8, 2},
-	layers.IPProtocolICMPv6: {8, 2},
+func checksummedProtocol(protocol layers.IPProtocol) (transportChecksum, bool) {
+	switch protocol {
+	case layers.IPProtocolTCP:
+		return transportChecksum{20, 16}, true
+	case layers.IPProtocolUDP:
+		return transportChecksum{8, 6}, true
+	case layers.IPProtocolICMPv4, layers.IPProtocolICMPv6:
+		return transportChecksum{8, 2}, true
+	}
+
+	return transportChecksum{}, false
 }
 
 // Only the last part may have an odd length.
@@ -93,7 +101,7 @@ func validIPv4HeaderChecksum(ip *layers.IPv4) bool {
 
 // Protocols without a checksum are always valid. A UDP checksum of zero is handled by the caller.
 func validTransportChecksum(pseudoHeader []byte, protocol layers.IPProtocol, payload []byte) bool {
-	transport, ok := checksummedProtocols[protocol]
+	transport, ok := checksummedProtocol(protocol)
 	if !ok {
 		return true
 	}
@@ -102,6 +110,7 @@ func validTransportChecksum(pseudoHeader []byte, protocol layers.IPProtocol, pay
 }
 
 func isZeroUDPChecksum(payload []byte, protocol layers.IPProtocol) bool {
-	offset := checksummedProtocols[layers.IPProtocolUDP].checksumOffset
+	udp, _ := checksummedProtocol(layers.IPProtocolUDP)
+	offset := udp.checksumOffset
 	return protocol == layers.IPProtocolUDP && len(payload) >= offset+2 && binary.BigEndian.Uint16(payload[offset:]) == 0
 }

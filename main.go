@@ -10,10 +10,16 @@ import (
 type Translator struct {
 	// Network prefix used for NAT64 translation, as defined in RFC 6052.
 	nat64Net *net.IPNet
+
+	// Whether nat64Net is the Well-Known Prefix (RFC 6052 Section 3.1).
+	wellKnownPrefix bool
+
 	// IPv4 address used for routing and ICMP error generation
 	ipv4RouterAddress net.IP
+
 	// EAM table (RFC 7757)
 	eamLookup *eamLookup
+
 	// MTU is the IPv6 path MTU used to determine the maximum IPv4 packet size.
 	MTU uint32
 }
@@ -81,6 +87,7 @@ func NewTranslatorWithMTU(nat64Net *net.IPNet, ipv4RouterAddress net.IP, eamTabl
 
 	return &Translator{
 		nat64Net:          nat64Net,
+		wellKnownPrefix:   isWellKnownPrefix(nat64Net),
 		ipv4RouterAddress: ipv4RouterAddress,
 		eamLookup:         eamLookup,
 		MTU:               mtu,

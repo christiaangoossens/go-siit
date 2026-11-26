@@ -12,7 +12,20 @@ import (
  */
 
 // ICMPv4 and ICMPv6 Echo Request/Reply types.
-var echoTypes = map[byte]byte{8: 128, 0: 129, 128: 8, 129: 0}
+func translatedEchoType(icmpType byte) (byte, bool) {
+	switch icmpType {
+	case 8:
+		return 128, true
+	case 0:
+		return 129, true
+	case 128:
+		return 8, true
+	case 129:
+		return 0, true
+	}
+
+	return 0, false
+}
 
 // translateTransport updates the checksum for the changed pseudo-header (RFC 1624), so it also works for the first
 // fragment of a segment or a truncated quote. Of ICMP, only a quoted Echo is translated here (RFC 7915 Sections 4.3
@@ -22,7 +35,8 @@ func translateTransport(protocol layers.IPProtocol, payload, removed, added []by
 
 	switch protocol {
 	case layers.IPProtocolTCP, layers.IPProtocolUDP:
-		offset := checksummedProtocols[protocol].checksumOffset
+		transport, _ := checksummedProtocol(protocol)
+		offset := transport.checksumOffset
 		if len(result) < offset+2 {
 			// A truncated quote can end before the checksum.
 			return result, false
@@ -40,7 +54,7 @@ func translateTransport(protocol layers.IPProtocol, payload, removed, added []by
 		}
 		binary.BigEndian.PutUint16(result[offset:], checksum)
 	case layers.IPProtocolICMPv4, layers.IPProtocolICMPv6:
-		newType, ok := echoTypes[result[0]]
+		newType, ok := translatedEchoType(result[0])
 		if !ok || len(result) < 4 {
 			// An ICMP error quoting an ICMP error is dropped.
 			return nil, true
