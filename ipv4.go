@@ -15,14 +15,19 @@ import (
 
 // TranslateIPv4 translates an IPv4 packet to IPv6.
 func (t *Translator) TranslateIPv4(packet gopacket.Packet, overrides TranslationOverrides) (TranslatedPacket, error) {
-	translated := TranslatedPacket{}
-	quoted := overrides.QuotedPacket
-
 	ip, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	if !ok {
 		// Not IPv4 packet, ignore because we are only translating IPv4 here
-		return translated, fmt.Errorf("%w: packet has no IPv4 layer", ErrInvalidPacket)
+		return TranslatedPacket{}, fmt.Errorf("%w: packet has no IPv4 layer", ErrInvalidPacket)
 	}
+
+	return t.translateIPv4(ip, overrides.QuotedPacket)
+}
+
+// translateIPv4 translates a decoded IPv4 packet to IPv6. quoted is true for the packet inside an ICMPv4 error
+// (RFC 7915 Section 4.3).
+func (t *Translator) translateIPv4(ip *layers.IPv4, quoted bool) (TranslatedPacket, error) {
+	translated := TranslatedPacket{}
 
 	// Verify that src and dst are both unicast
 	if !ip.SrcIP.IsGlobalUnicast() {

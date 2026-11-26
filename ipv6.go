@@ -25,14 +25,19 @@ var nextIdentification = func() *atomic.Uint32 {
 
 // TranslateIPv6 translates an IPv6 packet to IPv4.
 func (t *Translator) TranslateIPv6(packet gopacket.Packet, overrides TranslationOverrides) (TranslatedPacket, error) {
-	translated := TranslatedPacket{}
-	quoted := overrides.QuotedPacket
-
 	ip, ok := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
 	if !ok {
 		// Not IPv6 packet, ignore because we are only translating IPv6 here
-		return translated, fmt.Errorf("%w: packet has no IPv6 layer", ErrInvalidPacket)
+		return TranslatedPacket{}, fmt.Errorf("%w: packet has no IPv6 layer", ErrInvalidPacket)
 	}
+
+	return t.translateIPv6(ip, overrides.QuotedPacket)
+}
+
+// translateIPv6 translates a decoded IPv6 packet to IPv4. quoted is true for the packet inside an ICMPv6 error
+// (RFC 7915 Section 5.3).
+func (t *Translator) translateIPv6(ip *layers.IPv6, quoted bool) (TranslatedPacket, error) {
+	translated := TranslatedPacket{}
 
 	// Verify that src and dst are both unicast
 	if !ip.SrcIP.IsGlobalUnicast() {
